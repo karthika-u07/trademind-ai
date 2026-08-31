@@ -1,0 +1,1 @@
+"""TradeMind AI application package."""

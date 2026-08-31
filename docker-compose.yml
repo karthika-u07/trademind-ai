@@ -1,0 +1,46 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trademind-ai-backend
+    ports:
+      - "8000:8000"
+    environment:
+      APP_NAME: ${APP_NAME:-trademind-ai}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      LIVE_TRADING_ENABLED: ${LIVE_TRADING_ENABLED:-false}
+      RISK_PER_TRADE: ${RISK_PER_TRADE:-0.01}
+      MAX_DAILY_DRAWDOWN: ${MAX_DAILY_DRAWDOWN:-0.05}
+      MAX_DAILY_PROFIT: ${MAX_DAILY_PROFIT:-0.10}
+      MAX_OPEN_POSITIONS: ${MAX_OPEN_POSITIONS:-3}
+      MAX_SPREAD_POINTS: ${MAX_SPREAD_POINTS:-5.0}
+      MAX_SLIPPAGE_POINTS: ${MAX_SLIPPAGE_POINTS:-3.0}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://postgres:postgres@postgres:5432/trademind}
+    depends_on:
+      - redis
+      - postgres
+
+  redis:
+    image: redis:7-alpine
+    container_name: trademind-ai-redis
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: trademind-ai-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trademind}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
