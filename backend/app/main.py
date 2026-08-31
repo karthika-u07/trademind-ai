@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from backend.app.api.routes.health import router as health_router
+from backend.app.api.routes.market import router as market_router
 from backend.app.config.settings import settings
 from backend.app.observability.logging import configure_logging, logger
 
@@ -34,6 +35,7 @@ app = FastAPI(
 )
 
 app.include_router(health_router)
+app.include_router(market_router, prefix="/api/v1")
 
 
 @app.get("/")

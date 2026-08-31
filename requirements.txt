@@ -5,10 +5,11 @@ pydantic-settings==2.3.4
 langgraph>=0.2.56,<0.3
 langchain>=0.3.20,<0.4
 pandas>=2.3.1,<2.4
-numpy>=2.2.0,<3
+numpy>=1.26.4,<2
 ta==0.11.0
 redis==5.1.1
 SQLAlchemy==2.0.35
 psycopg[binary]==3.3.4
 pytest==8.3.3
 structlog==24.4.0
+MetaTrader5==5.0.45
