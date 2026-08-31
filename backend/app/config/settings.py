@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TradingMode = Literal["paper", "demo", "live"]
@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     mt5_server: str | None = None
     mt5_path: str | None = None
 
+    indicator_ema_fast: int = Field(default=9, gt=0)
+    indicator_ema_slow: int = Field(default=21, gt=0)
+    indicator_rsi_period: int = Field(default=14, gt=0)
+    indicator_atr_period: int = Field(default=14, gt=0)
+    indicator_adx_period: int = Field(default=14, gt=0)
+    indicator_macd_fast: int = Field(default=12, gt=0)
+    indicator_macd_slow: int = Field(default=26, gt=0)
+    indicator_macd_signal: int = Field(default=9, gt=0)
+
     redis_url: str = "redis://localhost:6379/0"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/trademind"
 
@@ -58,6 +67,15 @@ class Settings(BaseSettings):
                 "Invalid log level. Use DEBUG, INFO, WARNING, ERROR, or CRITICAL."
             )
         return normalized
+
+    @model_validator(mode="after")
+    def validate_indicator_settings(self) -> "Settings":
+        """Validate baseline indicator parameters without claiming they are optimal."""
+        if self.indicator_ema_slow <= self.indicator_ema_fast:
+            raise ValueError("indicator_ema_slow must be greater than indicator_ema_fast")
+        if self.indicator_macd_slow <= self.indicator_macd_fast:
+            raise ValueError("indicator_macd_slow must be greater than indicator_macd_fast")
+        return self
 
     @property
     def live_execution_allowed(self) -> bool:
