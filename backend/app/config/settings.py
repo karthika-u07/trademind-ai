@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     mt5_server: str | None = None
     mt5_path: str | None = None
 
+    market_data_max_age_seconds: int = Field(default=30, gt=0)
+    market_data_retry_count: int = Field(default=3, gt=0)
+    market_data_retry_delay_seconds: float = Field(default=2.0, ge=0)
+
     redis_url: str = "redis://localhost:6379/0"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/trademind"
 
