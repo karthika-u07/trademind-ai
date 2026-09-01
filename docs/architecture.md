@@ -67,3 +67,66 @@ Feature definitions:
 - Lower wick = min(open, close) - low
 
 This layer is analysis-only. It does not imply buy/sell decisions, risk management, or order execution.
+
+## Market Regime Engine
+
+The Phase 4 market regime engine classifies the current market state from already-computed technical features without issuing trading signals. Its purpose is to answer the question “what type of market are we observing?” and not “should we buy or sell?”.
+
+### Regime definitions
+
+- TRENDING_BULLISH: ADX confirms strength and the fast EMA sits above the slow EMA with positive slope alignment.
+- TRENDING_BEARISH: ADX confirms strength and the fast EMA sits below the slow EMA with negative slope alignment.
+- RANGING: ADX is weak to moderate and volatility is not extreme; the market is not showing strong directional agreement.
+- VOLATILE: ATR is materially above the causal historical reference and the market is showing unusually expanded volatility.
+- TRANSITION: indicator agreement is mixed or weak enough that the classification is ambiguous.
+- INSUFFICIENT_DATA: required features are warm-up, missing, NaN, infinite, or invalid and therefore cannot support a deterministic regime result.
+
+### Baseline thresholds
+
+The regime defaults are intentionally research-only and not claimed to be profitable or optimal:
+
+- ADX trend threshold: 25.0
+- ADX range threshold: 20.0
+- ATR high threshold: 1.50x causal historical ATR reference
+- ATR low threshold: 0.50x causal historical ATR reference
+- EMA distance minimum: 0.25
+- EMA slope minimum: 0.10
+
+These values are not guarantees of performance and may be tuned by instrument and timeframe in future research.
+
+### Trend strength vs. direction
+
+ADX measures trend strength only. It does not indicate direction. Direction comes from the EMA relationship and slope, e.g. fast EMA > slow EMA plus positive slope for bullish alignment, and fast EMA < slow EMA plus negative slope for bearish alignment.
+
+### ATR normalization and causal reference
+
+The market regime engine uses a causal historical ATR normalization method:
+
+- atr_ratio = current_atr / historical_atr_reference
+- historical_atr_reference is built from the current and prior ATR values only, never future candles
+- the reference uses a limited rolling lookback window and median-like historical anchor to keep the calculation deterministic
+- no centered windows, no future shifting, and no look-ahead are permitted
+
+This keeps normalization causal and deterministic while supporting symbol-scale adaptation.
+
+### Confidence
+
+Confidence is a deterministic agreement score from 0.0 to 1.0. It reflects how strongly the available features support the selected regime, not the probability of profit. Higher ADX, stronger EMA alignment, and stronger causal ATR normalization all increase confidence; conflicting or weak evidence lowers it. Insufficient data always yields a confidence of 0.0.
+
+### Transition behavior
+
+Transition is used when the regime is ambiguous or conflicting. Examples include indicator disagreement, ADX near threshold boundaries, and weak directional conviction. This explicit state avoids forcing every period into a binary trend classification.
+
+### Correlation and feature design
+
+EMA fast, EMA slow, EMA distance, EMA slope, MACD, and MACD signal are mathematically correlated. The regime engine deliberately uses a small number of distinct dimensions instead of an additive point score: trend strength (ADX), direction (EMA alignment), volatility (ATR ratio), and agreement/conflict (mixed or weak evidence). This avoids over-counting related features.
+
+### No-look-ahead and no-order policy
+
+The regime engine consumes only features available at or before the timestamp under evaluation. Future candles never influence the regime. The system remains analysis-only and does not create buy/sell decisions, risk checks, or order-routing logic.
+
+### Future extension point
+
+A simple config object is provided for deterministic future tuning. There is no mutable global state and no hysteresis implementation yet; if regime persistence becomes necessary later, it can be added as an explicit, deterministic extension without hidden state.
+
+This layer is analysis-only. It does not imply buy/sell decisions, risk management, or order execution.
