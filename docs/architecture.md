@@ -130,3 +130,64 @@ The regime engine consumes only features available at or before the timestamp un
 A simple config object is provided for deterministic future tuning. There is no mutable global state and no hysteresis implementation yet; if regime persistence becomes necessary later, it can be added as an explicit, deterministic extension without hidden state.
 
 This layer is analysis-only. It does not imply buy/sell decisions, risk management, or order execution.
+
+## Phase 6 — Deterministic Risk Engine
+
+The Phase 6 risk engine is a pure analysis and validation layer that determines whether a proposed trade is acceptable under configured risk limits. It consumes already-generated strategy output plus account, symbol, and market state, and it returns a deterministic risk decision. It does not issue orders, does not modify strategy logic, and does not perform broker execution.
+
+### Financial Arithmetic
+
+IMPORTANT FINANCIAL-ARITHMETIC REQUIREMENT:
+
+Position sizing and the planned_loss invariant check MUST use Decimal, not float.
+
+This is mandatory because floating-point rounding error could silently cause planned_loss > risk_amount at a risk boundary, violating the core invariant.
+
+Float arithmetic is acceptable elsewhere where it cannot affect a risk permission decision, such as intermediate ATR calculations, provided the final risk-sensitive values are converted to Decimal before sizing, normalization, and invariant checks.
+
+Do not use binary float equality for:
+- planned_loss <= risk_amount
+- volume-step normalization
+- volume_min / volume_max boundary decisions
+- risk-limit comparisons
+
+### Property-Style Safety Tests
+
+ADVERSARIAL VOLUME-NORMALIZATION TEST:
+
+Include at least one adversarial sizing case specifically designed to test the post-normalization safety invariant.
+
+The test must verify that:
+
+1. raw_volume is calculated.
+2. raw_volume is normalized down to the broker volume_step.
+3. planned_loss is recalculated using the normalized volume.
+4. planned_loss <= risk_amount.
+5. If the first normalized volume would exceed risk_amount because of Decimal/rounding behavior, the implementation reduces volume by another volume_step and rechecks.
+6. The final allowed volume can never exceed configured risk.
+
+Do not satisfy this requirement merely with a normal/simple volume-floor test.
+The test must exercise the safety re-check path.
+
+### Tick-Value Currency Assumption
+
+For Phase 6, explicitly document that tick_value is assumed to already be expressed in the account currency by the broker-metadata adapter.
+
+The pure Risk Engine does NOT perform currency conversion in this phase.
+
+If the supplied tick_value is not denominated in account currency, the Risk Engine must reject the sizing input rather than silently produce an incorrect risk amount.
+
+Currency conversion belongs to a later broker/account-metadata layer.
+
+### Risk-engine scope and boundaries
+
+The risk engine is intentionally separate from strategy and regime analysis. It evaluates whether a proposed trade is acceptable according to deterministic risk configuration, not whether the market should be bought or sold. This keeps the system audit-friendly and prevents strategy logic from being blended into the execution-safety layer.
+
+The design enforces a hard separation between:
+- market data and feature generation
+- regime classification
+- strategy signal generation
+- risk validation
+- execution authority
+
+The risk layer may calculate stops, take-profit levels, normalized position size, maximum allowed volume, exposure, drawdown state, daily profit state, open-position limits, kill-switch state, and overall risk permission. It must do so without touching broker execution APIs or order routing logic.
