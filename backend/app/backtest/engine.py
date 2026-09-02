@@ -14,8 +14,10 @@ from backend.app.backtest.portfolio import PortfolioState
 from backend.app.indicators.service import TechnicalFeatureService
 from backend.app.regime.service import MarketRegimeService
 from backend.app.risk.models import AccountSnapshot, ProposedTrade, RiskState, SymbolRiskMetadata
+from backend.app.risk.models import RiskConfig
 from backend.app.risk.service import RiskService
 from backend.app.risk.sizing import calculate_price_pnl
+from backend.app.strategy.models import StrategyConfig
 from backend.app.strategy.models import StrategySignal
 from backend.app.strategy.service import StrategyService
 
@@ -23,12 +25,17 @@ from backend.app.strategy.service import StrategyService
 class HistoricalBacktestEngine:
     """Sequential, historical, analysis-only simulation of the trading pipeline."""
 
-    def __init__(self, config: BacktestConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: BacktestConfig | None = None,
+        strategy_config: StrategyConfig | None = None,
+        risk_config: RiskConfig | None = None,
+    ) -> None:
         self.config = config or BacktestConfig()
         self.indicators = TechnicalFeatureService()
         self.regime_service = MarketRegimeService()
-        self.strategy_service = StrategyService()
-        self.risk_service = RiskService()
+        self.strategy_service = StrategyService(strategy_config)
+        self.risk_service = RiskService(risk_config)
 
     def _validate_candles(self, candles: list[dict[str, object]]) -> None:
         if not candles:
