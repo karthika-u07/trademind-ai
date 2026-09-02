@@ -20,7 +20,7 @@ from backend.app.regime.models import MarketRegime
 from backend.app.risk.exceptions import InvalidRiskInputError
 from backend.app.risk.limits import calculate_daily_drawdown, calculate_daily_profit, calculate_exposure_notional
 from backend.app.risk.models import AccountSnapshot, MarketSnapshot, ProposedTrade, RiskConfig, RiskDecision, RiskState, Side, SymbolRiskMetadata
-from backend.app.risk.sizing import normalize_volume_down, to_decimal
+from backend.app.risk.sizing import calculate_price_pnl, normalize_volume_down, to_decimal
 from backend.app.risk.stops import calculate_stop_distance, calculate_stop_loss, calculate_take_profit
 from backend.app.strategy.models import StrategySignal
 
@@ -384,7 +384,7 @@ class RiskService:
         if final_volume > volume_max:
             final_volume = volume_max
 
-        planned_loss = final_volume * risk_per_unit_volume
+        planned_loss = calculate_price_pnl(stop_distance, symbol_meta.tick_size, symbol_meta.tick_value, final_volume)
         if planned_loss > risk_amount:
             return self._decision(
                 allowed=False,
@@ -444,7 +444,12 @@ class RiskService:
                 timestamp=ts,
             )
 
-        planned_reward = abs((take_profit - proposed_trade.entry_price) * final_volume * symbol_meta.contract_size)
+        planned_reward = abs(calculate_price_pnl(
+            take_profit - proposed_trade.entry_price,
+            symbol_meta.tick_size,
+            symbol_meta.tick_value,
+            final_volume,
+        ))
         return self._decision(
             allowed=True,
             reason_codes=["RISK_ALLOWED"],

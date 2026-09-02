@@ -37,6 +37,21 @@ def normalize_volume_down(volume: Decimal, volume_step: Decimal) -> Decimal:
     return floored_units * volume_step
 
 
+def calculate_price_pnl(
+    price_difference: Decimal,
+    tick_size: Decimal,
+    tick_value: Decimal,
+    volume: Decimal,
+) -> Decimal:
+    if tick_size <= 0:
+        raise InvalidRiskInputError("tick_size must be positive")
+    if tick_value <= 0:
+        raise InvalidRiskInputError("tick_value must be positive")
+    if volume < 0:
+        raise InvalidRiskInputError("volume must be non-negative")
+    return (price_difference / tick_size) * tick_value * volume
+
+
 def normalize_volume_with_limits(volume: Decimal, volume_step: Decimal, volume_min: Decimal, volume_max: Decimal) -> Decimal:
     candidate = normalize_volume_down(volume, volume_step)
     if candidate < volume_min:
