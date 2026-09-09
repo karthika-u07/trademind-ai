@@ -6,7 +6,7 @@ import pytest
 
 from backend.app.indicators.models import TechnicalFeatureRow
 from backend.app.regime.models import MarketRegime, MarketRegimeResult
-from backend.app.strategy import StrategyConfig, StrategyService, StrategySignal
+from backend.app.strategy import StrategyConfig, StrategyService, StrategySignal, service
 from backend.app.strategy.rules import (
     ema_bearish_crossover,
     ema_bullish_crossover,
@@ -138,7 +138,17 @@ def test_transition_regime_is_hold() -> None:
 def test_ema_direction_bias() -> None:
     service = StrategyService()
     bullish = service.generate_signal([feature_row(ema_fast=101.0, ema_slow=100.0)], regime_result(regime=MarketRegime.TRENDING_BULLISH))
-    bearish = service.generate_signal([feature_row(ema_fast=99.0, ema_slow=100.0)], regime_result(regime=MarketRegime.TRENDING_BEARISH))
+    bearish = service.generate_signal(
+    [
+        feature_row(
+            ema_fast=99.0,
+            ema_slow=100.0,
+            macd=-1.0,
+            macd_signal=0.0,
+        )
+    ],
+    regime_result(regime=MarketRegime.TRENDING_BEARISH),
+)
     assert bullish.signal == StrategySignal.BUY
     assert bearish.signal == StrategySignal.SELL
 
@@ -147,7 +157,16 @@ def test_ema_slope_thresholds() -> None:
     service = StrategyService()
     positive = service.generate_signal([feature_row(ema_fast_slope=0.5)], regime_result(regime=MarketRegime.TRENDING_BULLISH))
     zero = service.generate_signal([feature_row(ema_fast_slope=0.0)], regime_result(regime=MarketRegime.TRENDING_BULLISH))
-    negative = service.generate_signal([feature_row(ema_fast_slope=-0.5)], regime_result(regime=MarketRegime.TRENDING_BEARISH))
+    negative = service.generate_signal(
+    [
+        feature_row(
+            ema_fast_slope=-0.5,
+            macd=-1.0,
+            macd_signal=0.0,
+        )
+    ],
+    regime_result(regime=MarketRegime.TRENDING_BEARISH),
+)
     assert positive.signal == StrategySignal.BUY
     assert zero.signal == StrategySignal.HOLD
     assert negative.signal == StrategySignal.SELL
@@ -205,7 +224,16 @@ def test_rsi_filtering() -> None:
     service = StrategyService()
     bullish = service.generate_signal([feature_row(rsi=60.0)], regime_result(regime=MarketRegime.TRENDING_BULLISH))
     neutral = service.generate_signal([feature_row(rsi=50.0)], regime_result(regime=MarketRegime.TRENDING_BULLISH))
-    bearish = service.generate_signal([feature_row(rsi=40.0)], regime_result(regime=MarketRegime.TRENDING_BEARISH))
+    bearish = service.generate_signal(
+    [
+        feature_row(
+            rsi=40.0,
+            macd=-1.0,
+            macd_signal=0.0,
+        )
+    ],
+    regime_result(regime=MarketRegime.TRENDING_BEARISH),
+)
     assert bullish.signal == StrategySignal.BUY
     assert neutral.signal == StrategySignal.HOLD
     assert bearish.signal == StrategySignal.SELL
@@ -222,7 +250,16 @@ def test_macd_confirmation() -> None:
 def test_engulfing_confirmation() -> None:
     service = StrategyService()
     bullish = service.generate_signal([feature_row(bullish_engulfing=True)], regime_result(regime=MarketRegime.TRENDING_BULLISH))
-    bearish = service.generate_signal([feature_row(bearish_engulfing=True)], regime_result(regime=MarketRegime.TRENDING_BEARISH))
+    bearish = service.generate_signal(
+    [
+        feature_row(
+            bearish_engulfing=True,
+            macd=-1.0,
+            macd_signal=0.0,
+        )
+    ],
+    regime_result(regime=MarketRegime.TRENDING_BEARISH),
+)
     assert bullish.signal == StrategySignal.BUY
     assert bearish.signal == StrategySignal.SELL
 

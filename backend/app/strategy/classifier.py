@@ -167,19 +167,6 @@ class StrategyClassifier:
         bullish = ema_direction_bullish(ema_fast, ema_slow)
         bearish = ema_direction_bearish(ema_fast, ema_slow)
 
-        bullish_crossover = ema_bullish_crossover(
-            previous_fast=previous_ema_fast,
-            previous_slow=previous_ema_slow,
-            current_fast=ema_fast,
-            current_slow=ema_slow,
-        )
-
-        bearish_crossover = ema_bearish_crossover(
-            previous_fast=previous_ema_fast,
-            previous_slow=previous_ema_slow,
-            current_fast=ema_fast,
-            current_slow=ema_slow,
-        )
         bullish_slope = slope_bullish(ema_fast_slope, self.config.minimum_ema_slope)
         bearish_slope = slope_bearish(ema_fast_slope, self.config.minimum_ema_slope)
         slope_neutral = ema_fast_slope is not None and abs(float(ema_fast_slope)) < self.config.minimum_ema_slope
@@ -191,8 +178,57 @@ class StrategyClassifier:
         if self.config.require_engulfing_confirmation:
             pattern_ok = bool(latest.bullish_engulfing or latest.bearish_engulfing)
 
-        bullish_signal = bullish or bullish_slope or rsi_bull or macd_bull or bool(latest.bullish_engulfing)
-        bearish_signal = bearish or bearish_slope or rsi_bear or macd_bear or bool(latest.bearish_engulfing)
+        macd_confirmation_bullish = (
+            macd_bull
+            if self.config.require_macd_confirmation
+            else True
+        )
+
+        macd_confirmation_bearish = (
+            macd_bear
+            if self.config.require_macd_confirmation
+            else True
+        )
+
+        engulfing_confirmation_bullish = (
+            bool(latest.bullish_engulfing)
+            if self.config.require_engulfing_confirmation
+            else True
+        )
+
+        engulfing_confirmation_bearish = (
+            bool(latest.bearish_engulfing)
+            if self.config.require_engulfing_confirmation
+            else True
+        )
+
+        bullish_signal = (
+            bullish
+            or bullish_slope
+            or rsi_bull
+            or macd_bull
+            or bool(latest.bullish_engulfing)
+        )
+
+        bearish_signal = (
+            bearish
+            or bearish_slope
+            or rsi_bear
+            or macd_bear
+            or bool(latest.bearish_engulfing)
+        )
+
+        bullish_signal = (
+            bullish_signal
+            and macd_confirmation_bullish
+            and engulfing_confirmation_bullish
+        )
+
+        bearish_signal = (
+            bearish_signal
+            and macd_confirmation_bearish
+            and engulfing_confirmation_bearish
+        )
 
         if regime not in {MarketRegime.TRENDING_BULLISH, MarketRegime.TRENDING_BEARISH}:
             signal = StrategySignal.HOLD
