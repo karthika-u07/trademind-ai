@@ -1,5 +1,4 @@
 """Deterministic signal generation from technical features and a regime result."""
-
 from __future__ import annotations
 
 import math
@@ -16,12 +15,12 @@ from backend.app.strategy.rules import (
     ema_direction_bullish,
     macd_bearish,
     macd_bullish,
+    regime_policy,
     rsi_bearish,
     rsi_bullish,
     slope_bearish,
     slope_bullish,
 )
-
 
 class StrategyClassifier:
     """Pure strategy classifier using only current or prior features."""
@@ -117,28 +116,16 @@ class StrategyClassifier:
                 macd_signal=macd_signal,
                 macd_histogram=macd_histogram,
             )
-
         reason_codes: list[str] = []
-        regime_ok = False
         regime_name = regime if regime is not None else None
-        if regime == MarketRegime.TRENDING_BULLISH:
-            regime_ok = True
-            reason_codes.append("REGIME_BULLISH")
-        elif regime == MarketRegime.TRENDING_BEARISH:
-            regime_ok = True
-            reason_codes.append("REGIME_BEARISH")
-        elif regime == MarketRegime.RANGING:
-            reason_codes.append("REGIME_RANGE")
-            regime_ok = bool(self.config.allow_ranging_regime)
-        elif regime == MarketRegime.VOLATILE:
-            reason_codes.append("REGIME_VOLATILE")
-            regime_ok = bool(self.config.allow_volatile_regime)
-        elif regime == MarketRegime.TRANSITION:
-            reason_codes.append("REGIME_TRANSITION")
-        elif regime == MarketRegime.INSUFFICIENT_DATA:
-            reason_codes.append("INSUFFICIENT_FEATURES")
+
+        if regime is None:
+            regime_code, regime_ok = "FEATURE_CONFLICT", False
         else:
-            reason_codes.append("FEATURE_CONFLICT")
+            regime_code, regime_ok = regime_policy(regime, self.config)
+
+        reason_codes.append(regime_code)
+
 
         bullish = ema_direction_bullish(ema_fast, ema_slow)
         bearish = ema_direction_bearish(ema_fast, ema_slow)

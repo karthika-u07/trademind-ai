@@ -27,11 +27,17 @@ def slope_bearish(ema_fast_slope: float | None, minimum: float) -> bool:
 
 
 def rsi_bullish(rsi: float | None, config: StrategyConfig) -> bool:
-    return rsi is not None and rsi > config.rsi_midpoint and rsi < 100.0
+    return (
+        rsi is not None
+        and config.rsi_midpoint < rsi <= config.rsi_upper_bound
+    )
 
 
 def rsi_bearish(rsi: float | None, config: StrategyConfig) -> bool:
-    return rsi is not None and 0.0 < rsi and rsi < config.rsi_midpoint
+    return (
+        rsi is not None
+        and config.rsi_lower_bound <= rsi < config.rsi_midpoint
+    )
 
 
 def macd_bullish(macd: float | None, macd_signal: float | None) -> bool:
