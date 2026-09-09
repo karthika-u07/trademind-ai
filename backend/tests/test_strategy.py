@@ -7,6 +7,10 @@ import pytest
 from backend.app.indicators.models import TechnicalFeatureRow
 from backend.app.regime.models import MarketRegime, MarketRegimeResult
 from backend.app.strategy import StrategyConfig, StrategyService, StrategySignal
+from backend.app.strategy.rules import (
+    ema_bearish_crossover,
+    ema_bullish_crossover,
+)
 
 
 def feature_row(
@@ -148,6 +152,54 @@ def test_ema_slope_thresholds() -> None:
     assert zero.signal == StrategySignal.HOLD
     assert negative.signal == StrategySignal.SELL
 
+def test_ema_bullish_crossover():
+    assert ema_bullish_crossover(
+        previous_fast=99.0,
+        previous_slow=100.0,
+        current_fast=101.0,
+        current_slow=100.0,
+    )
+
+
+def test_ema_bearish_crossover():
+    assert ema_bearish_crossover(
+        previous_fast=101.0,
+        previous_slow=100.0,
+        current_fast=99.0,
+        current_slow=100.0,
+    )
+
+
+def test_ema_alignment_is_not_a_crossover():
+    assert not ema_bullish_crossover(
+        previous_fast=101.0,
+        previous_slow=100.0,
+        current_fast=102.0,
+        current_slow=100.0,
+    )
+
+    assert not ema_bearish_crossover(
+        previous_fast=99.0,
+        previous_slow=100.0,
+        current_fast=98.0,
+        current_slow=100.0,
+    )
+
+
+def test_ema_crossover_returns_false_when_data_is_missing():
+    assert not ema_bullish_crossover(
+        previous_fast=None,
+        previous_slow=100.0,
+        current_fast=101.0,
+        current_slow=100.0,
+    )
+
+    assert not ema_bearish_crossover(
+        previous_fast=101.0,
+        previous_slow=100.0,
+        current_fast=None,
+        current_slow=100.0,
+    )
 
 def test_rsi_filtering() -> None:
     service = StrategyService()
