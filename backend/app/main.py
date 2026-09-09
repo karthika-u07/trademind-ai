@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from backend.app.api.routes.health import router as health_router
 from backend.app.config.settings import settings
 from backend.app.observability.logging import configure_logging, logger
-
+from backend.app.api.routes.backtest import router as backtest_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,6 +34,7 @@ app = FastAPI(
 )
 
 app.include_router(health_router)
+app.include_router(backtest_router)
 
 
 @app.get("/")

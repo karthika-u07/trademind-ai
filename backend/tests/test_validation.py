@@ -24,7 +24,6 @@ from backend.app.validation.models import (
 from backend.app.validation.service import WalkForwardValidator
 from backend.app.validation.splitter import ChronologicalSplitter
 from backend.tests.test_backtest import candles
-from backend.tests.test_backtest import candles
 
 
 def make_candles(count: int) -> list[dict[str, Any]]:

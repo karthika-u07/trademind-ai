@@ -55,8 +55,5 @@ def configure_logging(log_level: str = "INFO", environment: str = "development")
         processors=shared_processors,
         logger_factory=structlog.stdlib.LoggerFactory(),
         context_class=dict,
-        initial_values={"environment": environment},
-    )
-
-
+        )
 logger = structlog.get_logger("trademind-ai")

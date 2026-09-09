@@ -13,3 +13,6 @@ class ValidationInputError(ValidationError):
 
 class DataLeakageError(ValidationError):
     """Raised when training and validation data overlap or violate chronology."""
+
+class WalkForwardError(ValidationError):
+    """Raised for general errors during the walk-forward validation process."""

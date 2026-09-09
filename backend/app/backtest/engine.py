@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from itertools import count
-
+from backend.app.risk.symbols import get_symbol_metadata
 from backend.app.backtest.exceptions import BacktestValidationError
 from backend.app.backtest.execution import ExecutionSimulator
 from backend.app.backtest.metrics import calculate_metrics
@@ -20,6 +20,7 @@ from backend.app.risk.sizing import calculate_price_pnl
 from backend.app.strategy.models import StrategyConfig
 from backend.app.strategy.models import StrategySignal
 from backend.app.strategy.service import StrategyService
+from backend.tests.test_risk import symbol_meta
 
 
 class HistoricalBacktestEngine:
@@ -73,7 +74,7 @@ class HistoricalBacktestEngine:
                     raise BacktestValidationError(f"Non-positive price in candle at index {idx} field {field}")
 
     def _symbol_meta(self) -> SymbolRiskMetadata:
-        return SymbolRiskMetadata(
+        return  SymbolRiskMetadata(
             symbol="EURUSD",
             point=Decimal("0.0001"),
             tick_size=Decimal("0.0001"),
@@ -118,7 +119,10 @@ class HistoricalBacktestEngine:
     def run(self, candles: list[dict[str, object]], *, symbol: str = "EURUSD") -> BacktestResult:
         self._validate_candles(candles)
 
-        symbol_meta = self._symbol_meta()
+        symbol_meta = get_symbol_metadata(
+    symbol,
+    account_currency=self.config.account_currency,
+)
         execution = ExecutionSimulator(self.config.slippage_points, self.config.fee_rate, symbol_meta.tick_size)
         portfolio = PortfolioState(self.config.initial_capital, self.config.account_currency)
         trades: list[BacktestTrade] = []
