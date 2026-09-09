@@ -17,6 +17,46 @@ def ema_direction_bullish(ema_fast: float | None, ema_slow: float | None) -> boo
 def ema_direction_bearish(ema_fast: float | None, ema_slow: float | None) -> bool:
     return ema_fast is not None and ema_slow is not None and ema_fast < ema_slow
 
+def ema_bullish_crossover(
+    previous_fast: float | None,
+    previous_slow: float | None,
+    current_fast: float | None,
+    current_slow: float | None,
+) -> bool:
+    """Return True when the fast EMA crosses above the slow EMA."""
+    if (
+        previous_fast is None
+        or previous_slow is None
+        or current_fast is None
+        or current_slow is None
+    ):
+        return False
+
+    return (
+        previous_fast <= previous_slow
+        and current_fast > current_slow
+    )
+
+
+def ema_bearish_crossover(
+    previous_fast: float | None,
+    previous_slow: float | None,
+    current_fast: float | None,
+    current_slow: float | None,
+) -> bool:
+    """Return True when the fast EMA crosses below the slow EMA."""
+    if (
+        previous_fast is None
+        or previous_slow is None
+        or current_fast is None
+        or current_slow is None
+    ):
+        return False
+
+    return (
+        previous_fast >= previous_slow
+        and current_fast < current_slow
+    )
 
 def slope_bullish(ema_fast_slope: float | None, minimum: float) -> bool:
     return ema_fast_slope is not None and ema_fast_slope > minimum

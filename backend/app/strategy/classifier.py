@@ -11,6 +11,8 @@ from backend.app.strategy.exceptions import InvalidStrategyInputError
 from backend.app.strategy.models import StrategyConfig, StrategyResult, StrategySignal
 from backend.app.strategy.rules import (
     compute_confidence,
+    ema_bearish_crossover,
+    ema_bullish_crossover,
     ema_direction_bearish,
     ema_direction_bullish,
     macd_bearish,
@@ -79,13 +81,28 @@ class StrategyClassifier:
                 row for row in features if self._coerce_feature_row(row).timestamp <= regime_timestamp
             ]
         latest = self._coerce_feature_row(eligible[-1]) if eligible else self._latest_feature(features)
+        previous = (
+            self._coerce_feature_row(eligible[-2])
+            if len(eligible) >= 2
+            else None
+        )
+
         timestamp = latest.timestamp
+
         regime = getattr(regime_result, "regime", None)
         if regime is None and isinstance(regime_result, dict):
             regime = regime_result.get("regime")
 
         ema_fast = self._require_finite(latest.ema_fast, "ema_fast")
         ema_slow = self._require_finite(latest.ema_slow, "ema_slow")
+        previous_ema_fast = self._require_finite(
+            previous.ema_fast if previous is not None else None,
+            "previous_ema_fast",
+        )
+        previous_ema_slow = self._require_finite(
+            previous.ema_slow if previous is not None else None,
+            "previous_ema_slow",
+    )
         ema_distance = self._require_finite(latest.ema_distance, "ema_distance")
         ema_fast_slope = self._require_finite(latest.ema_fast_slope, "ema_fast_slope")
         ema_slow_slope = self._require_finite(latest.ema_slow_slope, "ema_slow_slope")
@@ -126,9 +143,43 @@ class StrategyClassifier:
 
         reason_codes.append(regime_code)
 
+        bullish_crossover = ema_bullish_crossover(
+            previous_fast=previous_ema_fast,
+            previous_slow=previous_ema_slow,
+            current_fast=ema_fast,
+            current_slow=ema_slow,
+        )
+
+        bearish_crossover = ema_bearish_crossover(
+            previous_fast=previous_ema_fast,
+            previous_slow=previous_ema_slow,
+            current_fast=ema_fast,
+            current_slow=ema_slow,
+        )
+
+        if bullish_crossover:
+            reason_codes.append("EMA_BULLISH_CROSSOVER")
+
+        if bearish_crossover:
+            reason_codes.append("EMA_BEARISH_CROSSOVER")
+
 
         bullish = ema_direction_bullish(ema_fast, ema_slow)
         bearish = ema_direction_bearish(ema_fast, ema_slow)
+
+        bullish_crossover = ema_bullish_crossover(
+            previous_fast=previous_ema_fast,
+            previous_slow=previous_ema_slow,
+            current_fast=ema_fast,
+            current_slow=ema_slow,
+        )
+
+        bearish_crossover = ema_bearish_crossover(
+            previous_fast=previous_ema_fast,
+            previous_slow=previous_ema_slow,
+            current_fast=ema_fast,
+            current_slow=ema_slow,
+        )
         bullish_slope = slope_bullish(ema_fast_slope, self.config.minimum_ema_slope)
         bearish_slope = slope_bearish(ema_fast_slope, self.config.minimum_ema_slope)
         slope_neutral = ema_fast_slope is not None and abs(float(ema_fast_slope)) < self.config.minimum_ema_slope
