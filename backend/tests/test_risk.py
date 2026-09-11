@@ -303,3 +303,91 @@ def test_risk_service_ignores_future_market_snapshot_for_causality() -> None:
     assert result.entry_price == Decimal("1.1000")
     assert result.allowed is True
     assert result.timestamp >= future_snapshot.timestamp - timedelta(days=1)
+
+
+def test_atr_based_stop_loss_and_take_profit_for_buy() -> None:
+    service = RiskService()
+
+    result = service.evaluate_trade(
+        strategy_signal=StrategySignal.BUY,
+        proposed_trade=trade(
+            side=Side.BUY,
+            entry_price=Decimal("1.1000"),
+            atr=Decimal("0.0010"),
+        ),
+        account=account(),
+        symbol_meta=symbol_meta(),
+        risk_state=risk_state(),
+    )
+
+    # Actual default multiplier = 1
+    # Stop distance = 0.0010 * 1 = 0.0010
+    assert result.stop_distance == Decimal("0.0010")
+    assert result.stop_loss == Decimal("1.0990")
+
+    # Actual default reward/risk ratio = 2
+    # TP distance = 0.0010 * 2 = 0.0020
+    assert result.take_profit == Decimal("1.1020")
+    assert result.reward_risk_ratio == Decimal("2")
+
+
+def test_atr_based_stop_loss_and_take_profit_for_sell() -> None:
+    service = RiskService()
+
+    result = service.evaluate_trade(
+        strategy_signal=StrategySignal.SELL,
+        proposed_trade=trade(
+            side=Side.SELL,
+            entry_price=Decimal("1.1000"),
+            atr=Decimal("0.0010"),
+        ),
+        account=account(),
+        symbol_meta=symbol_meta(),
+        risk_state=risk_state(),
+    )
+
+    # Stop distance = 0.0010 * 1 = 0.0010
+    assert result.stop_distance == Decimal("0.0010")
+    assert result.stop_loss == Decimal("1.1010")
+
+    # TP distance = 0.0010 * 2 = 0.0020
+    assert result.take_profit == Decimal("1.0980")
+    assert result.reward_risk_ratio == Decimal("2")
+
+def test_atr_stop_distance_rejects_value_below_minimum() -> None:
+    service = RiskService()
+
+    result = service.evaluate_trade(
+        strategy_signal=StrategySignal.BUY,
+        proposed_trade=trade(
+            side=Side.BUY,
+            entry_price=Decimal("1.1000"),
+            atr=Decimal("0.0001"),
+        ),
+        account=account(),
+        symbol_meta=symbol_meta(),
+        risk_state=risk_state(),
+    )
+
+    assert result.allowed is False
+    assert result.reason_codes == ["STOP_DISTANCE_TOO_SMALL"]
+    assert result.stop_distance == Decimal("0.00010")
+
+def test_atr_stop_distance_rejects_value_above_maximum() -> None:
+    service = RiskService()
+
+    result = service.evaluate_trade(
+        strategy_signal=StrategySignal.BUY,
+        proposed_trade=trade(
+            side=Side.BUY,
+            entry_price=Decimal("1.1000"),
+            atr=Decimal("51.0"),
+        ),
+        account=account(),
+        symbol_meta=symbol_meta(),
+        risk_state=risk_state(),
+    )
+
+    assert result.allowed is False
+    assert result.reason_codes == ["STOP_DISTANCE_TOO_LARGE"]
+    assert result.stop_distance == Decimal("51.0")
