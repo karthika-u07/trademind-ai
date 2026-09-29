@@ -8,7 +8,9 @@ from itertools import product
 from typing import Callable
 
 from backend.app.backtest.engine import HistoricalBacktestEngine
+from backend.app.backtest.exceptions import BacktestValidationError
 from backend.app.backtest.models import BacktestConfig, BacktestResult
+from backend.app.news.service import NewsService
 from backend.app.risk.models import RiskConfig
 from backend.app.strategy.models import StrategyConfig
 
@@ -57,8 +59,13 @@ class OptimizationResult:
 class ParameterOptimizer:
     """Exhaustive deterministic optimizer that delegates every evaluation to a backtest engine."""
 
-    def __init__(self, engine_factory: Callable[..., HistoricalBacktestEngine] = HistoricalBacktestEngine) -> None:
+    def __init__(
+        self,
+        engine_factory: Callable[..., HistoricalBacktestEngine] = HistoricalBacktestEngine,
+        news_service: NewsService | None = None,
+    ) -> None:
         self.engine_factory = engine_factory
+        self.news_service = news_service
 
     @staticmethod
     def _overrides(grid: dict[str, list[object]]) -> list[dict[str, object]]:
@@ -128,10 +135,22 @@ class ParameterOptimizer:
     ) -> OptimizationResult:
         evaluated = []
         for candidate in self.enumerate_candidates(grid):
+            engine_arguments: dict[str, object] = {
+                "config": backtest_config,
+                "strategy_config": candidate.strategy_config,
+                "risk_config": candidate.risk_config,
+            }
+
+            if backtest_config.news_filter_enabled:
+                if self.news_service is None:
+                    raise BacktestValidationError(
+                        "Historical news filtering requires an explicit NewsService provider"
+                    )
+
+                engine_arguments["news_service"] = self.news_service
+
             engine = self.engine_factory(
-                config=backtest_config,
-                strategy_config=candidate.strategy_config,
-                risk_config=candidate.risk_config,
+                **engine_arguments,
             )
             evaluated.append(replace(candidate, result=engine.run(candles)))
         return OptimizationResult(self.rank_candidates(evaluated, objective_config))

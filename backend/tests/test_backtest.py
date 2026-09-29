@@ -11,6 +11,8 @@ from backend.app.backtest.exceptions import BacktestValidationError
 from backend.app.backtest.execution import ExecutionSimulator
 from backend.app.backtest.metrics import calculate_metrics
 from backend.app.backtest.models import BacktestConfig, BacktestTrade, ExitReason, Side
+from backend.app.news.models import EconomicEvent, NewsImpact
+from backend.app.news.service import NewsService
 from backend.app.risk.models import RiskConfig
 from backend.app.risk.service import RiskService
 from backend.app.risk.sizing import calculate_price_pnl
@@ -69,7 +71,7 @@ def configured_engine(*, fee_rate: Decimal = Decimal("0"), max_daily_drawdown: D
 
 
 def open_position_candles() -> list[dict[str, object]]:
-    dataset = trending_candles()
+    dataset = trending_candles(length=30)
     dataset[26] = {"timestamp": dataset[26]["timestamp"], "open": 4.0, "high": 4.2, "low": 3.9, "close": 4.2}
     for index in range(27, len(dataset)):
         dataset[index] = {"timestamp": dataset[index]["timestamp"], "open": 4.0, "high": 4.2, "low": 3.9, "close": 4.0}
@@ -112,6 +114,28 @@ def test_no_trade_on_hold_signal() -> None:
     ds = candles()
     result = HistoricalBacktestEngine().run(ds)
     assert result.trades == [] or all(trade.exit_reason in {"END_OF_BACKTEST", "STOP_LOSS", "TAKE_PROFIT"} for trade in result.trades)
+
+
+def test_backtest_skips_news_filter_when_disabled() -> None:
+    def unexpected_provider(symbol: str, checked_at: datetime):
+        raise AssertionError("Disabled historical news filter called its provider")
+
+    engine = configured_engine()
+    engine.news_service = NewsService(provider=unexpected_provider)
+
+    result = engine.run(trending_candles())
+
+    assert len(result.trades) == 1
+
+
+def test_backtest_requires_news_service_when_filter_enabled() -> None:
+    with pytest.raises(
+        BacktestValidationError,
+        match="Historical news filtering requires an explicit NewsService provider",
+    ):
+        HistoricalBacktestEngine(
+            BacktestConfig(news_filter_enabled=True)
+        )
 
 
 def test_no_lookahead_regression_at_internal_boundary() -> None:
@@ -436,3 +460,47 @@ def test_metric_sanity_values() -> None:
     assert metrics.profit_factor == Decimal("4")
     assert metrics.expectancy == Decimal("56.25")
     assert metrics.average_trade == Decimal("56.25")
+
+
+def test_high_impact_news_blocks_new_backtest_entry() -> None:
+    dataset = trending_candles(length=30)
+
+    signal_timestamp = dataset[25]["timestamp"]
+
+    def fake_news_provider(
+        symbol: str,
+        checked_at: datetime,
+    ) -> list[EconomicEvent]:
+        return [
+            EconomicEvent(
+                event_id="us-cpi-2024-01-01",
+                title="US CPI",
+                currency="USD",
+                impact=NewsImpact.HIGH,
+                scheduled_at=signal_timestamp,
+                actual=None,
+                forecast=None,
+                previous=None,
+            )
+        ]
+
+    news_service = NewsService(provider=fake_news_provider)
+
+    engine = HistoricalBacktestEngine(
+        config=BacktestConfig(news_filter_enabled=True),
+        news_service=news_service,
+    )
+
+    result = engine.run(dataset, symbol="XAUUSD")
+
+    blocked_start = signal_timestamp - timedelta(minutes=10)
+    blocked_end = signal_timestamp + timedelta(minutes=10)
+
+    assert all(
+        not (
+            blocked_start
+            <= trade.signal_timestamp
+            <= blocked_end
+        )
+        for trade in result.trades
+    )
