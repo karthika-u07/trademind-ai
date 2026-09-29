@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+from backend.app.execution import mt5_executor
 from backend.app.execution.mt5_executor import MT5Executor
 from backend.app.execution.news_guard import NewsEvent, NewsGuard
 from backend.app.notifications import news_monitor
@@ -17,6 +18,15 @@ EVENT_TIME = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
 CSV_HEADER = (
     "event_id,title,currency,impact,scheduled_at,actual,forecast,previous\n"
 )
+
+
+def test_connect_requires_metatrader5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mt5_executor, "mt5", None)
+
+    with pytest.raises(RuntimeError, match="MetaTrader5 package is required"):
+        MT5Executor().connect()
 
 
 def make_event(

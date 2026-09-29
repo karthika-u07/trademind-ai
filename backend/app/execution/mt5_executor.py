@@ -6,7 +6,12 @@ from pathlib import Path
 from threading import Lock
 from typing import Optional
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ModuleNotFoundError as error:
+    if error.name != "MetaTrader5":
+        raise
+    mt5 = None
 
 from backend.app.config.settings import settings
 from backend.app.execution.news_guard import NewsEvent, NewsGuard
@@ -200,6 +205,11 @@ class MT5Executor:
         """
         Initialize and connect to MetaTrader 5.
         """
+
+        if mt5 is None:
+            raise RuntimeError(
+                "MetaTrader5 package is required to connect"
+            )
 
         if self.connected:
             return True
