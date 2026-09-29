@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from backend.app.backtest.engine import HistoricalBacktestEngine
 from backend.app.backtest.exceptions import BacktestValidationError
 from backend.app.backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
+from backend.app.news.service import NewsService
 from backend.app.risk.models import RiskConfig
 from backend.app.strategy.models import StrategyConfig
 
@@ -115,6 +116,70 @@ def test_optimizer_evaluates_each_candidate_through_injected_backtest_engine() -
     assert len(calls) == 2
     assert all(call[2] is dataset for call in calls)
     assert {call[0].minimum_adx for call in calls} == {20.0, 25.0}
+
+
+def test_optimizer_propagates_historical_news_service() -> None:
+    ParameterGrid, OptimizationConfig, ParameterOptimizer = optimization_api()
+    calls = []
+    news_service = NewsService(provider=lambda symbol, checked_at: [])
+
+    class SpyEngine:
+        def __init__(
+            self,
+            *,
+            config,
+            strategy_config,
+            risk_config,
+            news_service,
+        ) -> None:
+            calls.append(
+                (config, strategy_config, risk_config, news_service)
+            )
+
+        def run(self, candles):
+            return result(
+                expectancy=Decimal("2"),
+                trade_count=3,
+                max_drawdown=Decimal("1"),
+            )
+
+    config = BacktestConfig(news_filter_enabled=True)
+    grid = ParameterGrid(
+        strategy={"minimum_adx": [20.0, 25.0]},
+        risk={"risk_per_trade": [Decimal("0.005")]},
+    )
+
+    ParameterOptimizer(
+        engine_factory=SpyEngine,
+        news_service=news_service,
+    ).optimize(
+        optimization_candles(),
+        grid,
+        config,
+        OptimizationConfig(),
+    )
+
+    assert len(calls) == 2
+    assert all(call[0] is config for call in calls)
+    assert all(call[3] is news_service for call in calls)
+
+
+def test_optimizer_requires_news_service_when_filter_enabled() -> None:
+    ParameterGrid, OptimizationConfig, ParameterOptimizer = optimization_api()
+
+    with pytest.raises(
+        BacktestValidationError,
+        match="Historical news filtering requires an explicit NewsService provider",
+    ):
+        ParameterOptimizer().optimize(
+            optimization_candles(),
+            ParameterGrid(
+                strategy={"minimum_adx": [25.0]},
+                risk={},
+            ),
+            BacktestConfig(news_filter_enabled=True),
+            OptimizationConfig(),
+        )
 
 
 def test_candidate_strategy_config_changes_production_backtest_behavior() -> None:

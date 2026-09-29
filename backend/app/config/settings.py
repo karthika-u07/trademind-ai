@@ -7,12 +7,15 @@ both the trading mode and runtime flag explicitly permit it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TradingMode = Literal["paper", "demo", "live"]
+DEFAULT_NEWS_BLOCK_BEFORE_MINUTES = 10
+DEFAULT_NEWS_BLOCK_AFTER_MINUTES = 10
 
 
 class Settings(BaseSettings):
@@ -43,6 +46,20 @@ class Settings(BaseSettings):
     mt5_password: str | None = None
     mt5_server: str | None = None
     mt5_path: str | None = None
+
+    news_calendar_file: Path = Path(
+        r"C:\Users\karth\AppData\Roaming\MetaQuotes\Terminal\Common\Files"
+        r"\trademind_calendar.csv"
+    )
+    news_calendar_refresh_seconds: float = Field(default=30, gt=0)
+    news_block_before_minutes: int = Field(
+        default=DEFAULT_NEWS_BLOCK_BEFORE_MINUTES,
+        ge=0,
+    )
+    news_block_after_minutes: int = Field(
+        default=DEFAULT_NEWS_BLOCK_AFTER_MINUTES,
+        ge=0,
+    )
 
     indicator_ema_fast: int = Field(default=9, gt=0)
     indicator_ema_slow: int = Field(default=21, gt=0)
@@ -75,6 +92,8 @@ class Settings(BaseSettings):
             raise ValueError("indicator_ema_slow must be greater than indicator_ema_fast")
         if self.indicator_macd_slow <= self.indicator_macd_fast:
             raise ValueError("indicator_macd_slow must be greater than indicator_macd_fast")
+        if self.news_block_before_minutes == 0 and self.news_block_after_minutes == 0:
+            raise ValueError("At least one news blocking window must be greater than zero")
         return self
 
     @property

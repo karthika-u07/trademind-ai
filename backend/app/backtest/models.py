@@ -42,6 +42,7 @@ class BacktestConfig(BaseModel):
     risk_per_trade: Decimal = Field(default=Decimal("0.01"), gt=0, le=1)
     max_daily_drawdown: Decimal = Field(default=Decimal("0.05"), gt=0, le=1)
     max_daily_profit: Decimal = Field(default=Decimal("0.10"), gt=0, le=1)
+    news_filter_enabled: bool = False
 
     @field_validator("account_currency")
     @classmethod

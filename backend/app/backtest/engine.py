@@ -13,6 +13,7 @@ from backend.app.backtest.models import BacktestConfig, BacktestResult, Backtest
 from backend.app.backtest.portfolio import PortfolioState
 from backend.app.indicators.service import TechnicalFeatureService
 from backend.app.regime.service import MarketRegimeService
+from backend.app.news.service import NewsService
 from backend.app.risk.models import AccountSnapshot, ProposedTrade, RiskState, SymbolRiskMetadata
 from backend.app.risk.models import RiskConfig
 from backend.app.risk.service import RiskService
@@ -20,7 +21,6 @@ from backend.app.risk.sizing import calculate_price_pnl
 from backend.app.strategy.models import StrategyConfig
 from backend.app.strategy.models import StrategySignal
 from backend.app.strategy.service import StrategyService
-from backend.tests.test_risk import symbol_meta
 
 
 class HistoricalBacktestEngine:
@@ -31,12 +31,20 @@ class HistoricalBacktestEngine:
         config: BacktestConfig | None = None,
         strategy_config: StrategyConfig | None = None,
         risk_config: RiskConfig | None = None,
+        news_service: NewsService | None = None,
     ) -> None:
         self.config = config or BacktestConfig()
+
+        if self.config.news_filter_enabled and news_service is None:
+            raise BacktestValidationError(
+                "Historical news filtering requires an explicit NewsService provider"
+            )
+
         self.indicators = TechnicalFeatureService()
         self.regime_service = MarketRegimeService()
         self.strategy_service = StrategyService(strategy_config)
         self.risk_service = RiskService(risk_config)
+        self.news_service = news_service
 
     def _validate_candles(self, candles: list[dict[str, object]]) -> None:
         if not candles:
@@ -223,6 +231,22 @@ class HistoricalBacktestEngine:
             if strategy.signal in {StrategySignal.BUY, StrategySignal.SELL} and not open_positions and index + 1 < len(candles):
                 next_candle = candles[index + 1]
                 side = Side.BUY if strategy.signal == StrategySignal.BUY else Side.SELL
+
+                if self.config.news_filter_enabled:
+                    if self.news_service is None:
+                        raise BacktestValidationError(
+                            "Historical news filtering requires an explicit NewsService provider"
+                        )
+
+                    news_result = self.news_service.evaluate(
+                        symbol=symbol,
+                        signal_time=current_time,
+                    )
+
+                    if not news_result.allowed:
+                        pending_entry = None
+                        continue
+
                 planned_entry_price = execution.entry_price_for(side, Decimal(str(candle["close"])))
                 proposed_trade = ProposedTrade(
                     symbol=symbol,

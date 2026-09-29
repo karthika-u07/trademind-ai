@@ -17,6 +17,9 @@ def test_configuration_defaults_are_safe() -> None:
     assert settings.risk_per_trade > 0
     assert settings.max_daily_drawdown > 0
     assert settings.max_open_positions > 0
+    assert settings.news_calendar_refresh_seconds == 30
+    assert settings.news_block_before_minutes == 10
+    assert settings.news_block_after_minutes == 10
 
 
 def test_live_trading_disabled_by_default() -> None:
