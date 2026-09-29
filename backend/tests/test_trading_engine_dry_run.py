@@ -1,3 +1,6 @@
+import pytest
+
+pytest.importorskip("MetaTrader5")
 from decimal import Decimal
 
 from backend.app.risk.models import ProposedTrade, RiskConfig
