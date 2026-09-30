@@ -7,6 +7,7 @@ both the trading mode and runtime flag explicitly permit it.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -41,6 +42,24 @@ class Settings(BaseSettings):
     max_open_positions: int = Field(default=3, gt=0, le=50)
     max_spread_points: float = Field(default=5.0, gt=0)
     max_slippage_points: float = Field(default=3.0, gt=0)
+    position_trailing_stop_enabled: bool = False
+    position_trailing_trigger_atr_multiplier: Decimal = Field(
+        default=Decimal("1.5"),
+        gt=0,
+    )
+    position_trailing_distance_atr_multiplier: Decimal = Field(
+        default=Decimal("1.0"),
+        gt=0,
+    )
+    position_break_even_enabled: bool = False
+    position_break_even_trigger_atr_multiplier: Decimal = Field(
+        default=Decimal("1.0"),
+        gt=0,
+    )
+    position_break_even_offset_points: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+    )
 
     mt5_login: int | None = None
     mt5_password: str | None = None
