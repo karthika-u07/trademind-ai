@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import time
 
+from backend.app.config.settings import settings
 from backend.app.notifications.news_monitor import NewsMonitor
 from backend.app.position_management.models import PositionSnapshot
 from backend.app.position_management.service import PositionManagementService
@@ -31,10 +32,28 @@ def _observe_open_positions(
     engine: TradingEngine,
     service: PositionManagementService,
 ) -> None:
-    for raw_position in engine.executor.get_open_positions():
+    raw_positions = engine.executor.get_open_positions()
+    management_enabled = (
+        service.trailing_stop_enabled or service.break_even_enabled
+    )
+    contexts: dict[str, dict[str, Decimal | int | None] | None] = {}
+
+    for raw_position in raw_positions:
+        symbol = str(raw_position["symbol"]).strip().upper()
+        if management_enabled and symbol not in contexts:
+            try:
+                contexts[symbol] = engine.get_position_management_context(symbol)
+            except Exception:
+                contexts[symbol] = None
+                logger.exception(
+                    "position_management_context_failed symbol=%s",
+                    symbol,
+                )
+
+        context = contexts.get(symbol)
         position = PositionSnapshot(
             ticket=raw_position["ticket"],
-            symbol=raw_position["symbol"],
+            symbol=symbol,
             side=Side(raw_position["side"]),
             volume=Decimal(str(raw_position["volume"])),
             open_price=Decimal(str(raw_position["open_price"])),
@@ -51,14 +70,40 @@ def _observe_open_positions(
             ),
             profit=Decimal(str(raw_position["profit"])),
             timestamp=raw_position["timestamp"],
+            atr=context["atr"] if context is not None else None,
+            point=context["point"] if context is not None else None,
+            tick_size=context["tick_size"] if context is not None else None,
+            digits=context["digits"] if context is not None else None,
         )
         decision = service.evaluate_stops(position)
+        modification_result = None
+        if (
+            management_enabled
+            and decision.allowed
+            and decision.desired_stop_loss is not None
+        ):
+            try:
+                modification_result = engine.executor.modify_position_stops(
+                    ticket=position.ticket,
+                    symbol=position.symbol,
+                    stop_loss=decision.desired_stop_loss,
+                    take_profit=None,
+                )
+            except Exception:
+                logger.exception(
+                    "position_management_modification_failed ticket=%s symbol=%s",
+                    position.ticket,
+                    position.symbol,
+                )
+
         logger.info(
-            "position_management_observation ticket=%s symbol=%s action=%s reasons=%s",
+            "position_management_observation ticket=%s symbol=%s "
+            "action=%s reasons=%s modification=%s",
             decision.ticket,
             decision.symbol,
             decision.action.value,
             decision.reason_codes,
+            modification_result,
         )
 
 
@@ -121,7 +166,20 @@ def main() -> None:
         _ensure_mt5_running()
         engine.connect()
         news_monitor = NewsMonitor()
-        position_management = PositionManagementService()
+        position_management = PositionManagementService(
+            trailing_stop_enabled=settings.position_trailing_stop_enabled,
+            trailing_trigger_atr_multiplier=(
+                settings.position_trailing_trigger_atr_multiplier
+            ),
+            trailing_distance_atr_multiplier=(
+                settings.position_trailing_distance_atr_multiplier
+            ),
+            break_even_enabled=settings.position_break_even_enabled,
+            break_even_trigger_atr_multiplier=(
+                settings.position_break_even_trigger_atr_multiplier
+            ),
+            break_even_offset_points=settings.position_break_even_offset_points,
+        )
 
         while True:
             try:

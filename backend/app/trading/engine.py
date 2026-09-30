@@ -288,6 +288,38 @@ class TradingEngine:
 
         return normalized
 
+    def get_position_management_context(
+        self,
+        symbol: str,
+    ) -> dict[str, Decimal | int | None]:
+        """Return closed-candle ATR and broker price metadata for a symbol."""
+
+        normalized_symbol = symbol.strip().upper()
+        candles = self.market.get_candles(
+            normalized_symbol,
+            self.timeframe,
+            count=self.candle_count,
+        )
+        closed_candles: list[dict[str, Any]] = []
+        for candle in candles[:-1]:
+            item = dict(candle)
+            item["is_closed"] = True
+            closed_candles.append(item)
+
+        latest_atr: Decimal | None = None
+        if closed_candles:
+            features = self.indicators.calculate_features(closed_candles)
+            if features and features[-1].atr is not None:
+                latest_atr = Decimal(str(features[-1].atr))
+
+        metadata = self.market.get_symbol_metadata(normalized_symbol)
+        return {
+            "atr": latest_atr,
+            "point": Decimal(str(metadata["point"])),
+            "tick_size": Decimal(str(metadata["trade_tick_size"])),
+            "digits": int(metadata["digits"]),
+        }
+
     def _run_analysis(
         self,
     ) -> tuple[Any, Any, Any, list[dict[str, Any]]]:
