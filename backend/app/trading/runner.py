@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from pathlib import Path
 import subprocess
 import time
 
 from backend.app.notifications.news_monitor import NewsMonitor
+from backend.app.position_management.models import PositionSnapshot
+from backend.app.position_management.service import PositionManagementService
+from backend.app.risk.models import Side
 from backend.app.trading.engine import TradingEngine
 
 MT5_EXECUTABLE = Path(r"C:\Program Files\MetaTrader 5\terminal64.exe")
@@ -21,6 +25,41 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _observe_open_positions(
+    engine: TradingEngine,
+    service: PositionManagementService,
+) -> None:
+    for raw_position in engine.executor.get_open_positions():
+        position = PositionSnapshot(
+            ticket=raw_position["ticket"],
+            symbol=raw_position["symbol"],
+            side=Side(raw_position["side"]),
+            volume=Decimal(str(raw_position["volume"])),
+            open_price=Decimal(str(raw_position["open_price"])),
+            current_price=Decimal(str(raw_position["current_price"])),
+            stop_loss=(
+                Decimal(str(raw_position["stop_loss"]))
+                if raw_position["stop_loss"] is not None
+                else None
+            ),
+            take_profit=(
+                Decimal(str(raw_position["take_profit"]))
+                if raw_position["take_profit"] is not None
+                else None
+            ),
+            profit=Decimal(str(raw_position["profit"])),
+            timestamp=raw_position["timestamp"],
+        )
+        decision = service.evaluate_stops(position)
+        logger.info(
+            "position_management_observation ticket=%s symbol=%s action=%s reasons=%s",
+            decision.ticket,
+            decision.symbol,
+            decision.action.value,
+            decision.reason_codes,
+        )
 
 
 def _is_mt5_running() -> bool:
@@ -82,6 +121,7 @@ def main() -> None:
         _ensure_mt5_running()
         engine.connect()
         news_monitor = NewsMonitor()
+        position_management = PositionManagementService()
 
         while True:
             try:
@@ -95,6 +135,13 @@ def main() -> None:
             except Exception:
                 logger.exception(
                     "Trading cycle failed"
+                )
+
+            try:
+                _observe_open_positions(engine, position_management)
+            except Exception:
+                logger.exception(
+                    "Position observation cycle failed"
                 )
 
             try:
