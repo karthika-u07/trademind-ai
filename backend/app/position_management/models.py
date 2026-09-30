@@ -29,6 +29,10 @@ class PositionSnapshot(BaseModel):
     take_profit: Decimal | None = Field(default=None, ge=0)
     profit: Decimal
     timestamp: datetime | None = None
+    atr: Decimal | None = None
+    point: Decimal | None = Field(default=None, gt=0)
+    tick_size: Decimal | None = Field(default=None, gt=0)
+    digits: int | None = Field(default=None, ge=0, le=8)
 
     @field_validator("symbol")
     @classmethod
