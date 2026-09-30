@@ -15,6 +15,7 @@ except ModuleNotFoundError as error:
 
 from backend.app.config.settings import settings
 from backend.app.execution.news_guard import NewsEvent, NewsGuard
+from backend.app.execution.safety import ExecutionGate
 from backend.app.news.rules import extract_symbol_currencies
 
 
@@ -270,6 +271,169 @@ class MT5Executor:
                 )
 
         return True
+
+    def get_open_positions(self) -> list[dict]:
+        """Return normalized snapshots of all currently open MT5 positions."""
+
+        if not self.connected:
+            raise RuntimeError("MT5 is not connected")
+
+        positions = mt5.positions_get()
+        if positions is None:
+            raise RuntimeError(
+                f"MT5 positions_get failed: {mt5.last_error()}"
+            )
+
+        snapshots: list[dict] = []
+        for position in positions:
+            opened_at = getattr(position, "time", None)
+            if position.type == mt5.POSITION_TYPE_BUY:
+                side = "BUY"
+            elif position.type == mt5.POSITION_TYPE_SELL:
+                side = "SELL"
+            else:
+                raise ValueError(
+                    f"Unsupported MT5 position type: {position.type}"
+                )
+
+            snapshots.append(
+                {
+                    "ticket": int(position.ticket),
+                    "symbol": str(position.symbol),
+                    "side": side,
+                    "volume": position.volume,
+                    "open_price": position.price_open,
+                    "current_price": position.price_current,
+                    "stop_loss": position.sl or None,
+                    "take_profit": position.tp or None,
+                    "profit": position.profit,
+                    "timestamp": (
+                        datetime.fromtimestamp(opened_at, tz=timezone.utc)
+                        if opened_at
+                        else None
+                    ),
+                }
+            )
+
+        return snapshots
+
+    def modify_position_stops(
+        self,
+        ticket: int,
+        symbol: str,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+    ) -> dict:
+        """Modify an open position's SL/TP without executing a market order."""
+
+        if not self.connected:
+            raise RuntimeError("MT5 is not connected")
+        if isinstance(ticket, bool) or not isinstance(ticket, int) or ticket <= 0:
+            raise ValueError("ticket must be a positive integer")
+
+        normalized_symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
+        if not normalized_symbol:
+            raise ValueError("symbol must not be blank")
+        if stop_loss is None and take_profit is None:
+            raise ValueError("stop_loss or take_profit must be supplied")
+        if stop_loss is not None and stop_loss < 0:
+            raise ValueError("stop_loss must not be negative")
+        if take_profit is not None and take_profit < 0:
+            raise ValueError("take_profit must not be negative")
+
+        base_result = {
+            "ticket": ticket,
+            "symbol": normalized_symbol,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        }
+
+        if self.dry_run:
+            return {
+                "success": True,
+                "sent": False,
+                "dry_run": True,
+                **base_result,
+                "retcode": None,
+                "comment": "Dry run - position stops not modified",
+            }
+
+        execution_gate = ExecutionGate.from_settings()
+        if (
+            not settings.live_execution_allowed
+            or not execution_gate.is_live_allowed()
+        ):
+            return {
+                "success": False,
+                "sent": False,
+                "dry_run": False,
+                **base_result,
+                "retcode": None,
+                "comment": (
+                    "Live position modification denied by execution policy"
+                ),
+            }
+
+        positions = mt5.positions_get(ticket=ticket)
+        if positions is None:
+            raise RuntimeError(
+                f"MT5 positions_get failed: {mt5.last_error()}"
+            )
+        if not positions:
+            raise ValueError(f"Open position {ticket} was not found")
+
+        position = positions[0]
+        if str(position.symbol).upper() != normalized_symbol:
+            raise ValueError(
+                f"Position {ticket} belongs to '{position.symbol}', "
+                f"not '{normalized_symbol}'"
+            )
+
+        effective_stop_loss = position.sl if stop_loss is None else stop_loss
+        effective_take_profit = position.tp if take_profit is None else take_profit
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": normalized_symbol,
+            "sl": float(
+                effective_stop_loss
+                if effective_stop_loss is not None
+                else 0.0
+            ),
+            "tp": float(
+                effective_take_profit
+                if effective_take_profit is not None
+                else 0.0
+            ),
+        }
+        result = mt5.order_send(request)
+
+        if result is None:
+            return {
+                "success": False,
+                "sent": True,
+                "dry_run": False,
+                **base_result,
+                "retcode": None,
+                "comment": f"MT5 order_send failed: {mt5.last_error()}",
+            }
+
+        result_dict = result._asdict()
+        retcode = result_dict.get("retcode")
+        successful_codes = {
+            mt5.TRADE_RETCODE_DONE,
+            mt5.TRADE_RETCODE_PLACED,
+            mt5.TRADE_RETCODE_DONE_PARTIAL,
+        }
+
+        return {
+            "success": retcode in successful_codes,
+            "sent": True,
+            "dry_run": False,
+            **base_result,
+            "retcode": retcode,
+            "comment": result_dict.get("comment"),
+        }
 
     def get_filling_mode(self, symbol_info):
         """
