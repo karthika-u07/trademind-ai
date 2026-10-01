@@ -19,6 +19,9 @@ def test_configuration_defaults_are_safe() -> None:
     assert settings.risk_per_trade > 0
     assert settings.max_daily_drawdown > 0
     assert settings.max_open_positions > 0
+    assert settings.max_symbol_exposure == Decimal("100000.0")
+    assert settings.max_total_exposure == Decimal("200000.0")
+    assert settings.maximum_position_risk == Decimal("100000.0")
     assert settings.news_calendar_refresh_seconds == 30
     assert settings.news_block_before_minutes == 10
     assert settings.news_block_after_minutes == 10
@@ -46,6 +49,15 @@ def test_invalid_risk_values_are_rejected() -> None:
 
     with pytest.raises(ValidationError):
         Settings(max_daily_drawdown=1.5)
+
+    with pytest.raises(ValidationError):
+        Settings(max_symbol_exposure=0)
+
+    with pytest.raises(ValidationError):
+        Settings(max_total_exposure=0)
+
+    with pytest.raises(ValidationError):
+        Settings(maximum_position_risk=0)
 
 
 def test_position_management_defaults_are_safe() -> None:

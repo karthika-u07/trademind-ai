@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     max_daily_drawdown: float = Field(default=0.05, gt=0, le=1)
     max_daily_profit: float = Field(default=0.10, gt=0, le=1)
     max_open_positions: int = Field(default=3, gt=0, le=50)
+    max_symbol_exposure: Decimal = Field(default=Decimal("100000.0"), gt=0)
+    max_total_exposure: Decimal = Field(default=Decimal("200000.0"), gt=0)
+    maximum_position_risk: Decimal = Field(default=Decimal("100000.0"), gt=0)
     max_spread_points: float = Field(default=5.0, gt=0)
     max_slippage_points: float = Field(default=3.0, gt=0)
     position_trailing_stop_enabled: bool = False

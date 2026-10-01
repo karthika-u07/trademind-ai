@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,9 @@ class TradingEngine:
                 max_daily_drawdown=Decimal(str(settings.max_daily_drawdown)),
                 max_daily_profit=Decimal(str(settings.max_daily_profit)),
                 max_open_positions=settings.max_open_positions,
+                max_symbol_exposure=Decimal(str(settings.max_symbol_exposure)),
+                max_total_exposure=Decimal(str(settings.max_total_exposure)),
+                maximum_position_risk=Decimal(str(settings.maximum_position_risk)),
             )
         )
 
@@ -124,55 +127,95 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     def _load_state(self) -> dict[str, Any]:
-        if not self.state_file.exists():
-            return {}
-
         try:
-            return json.loads(
+            if not self.state_file.exists():
+                return {}
+            state = json.loads(
                 self.state_file.read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError):
+            if not isinstance(state, dict):
+                raise ValueError("Trading state must be a JSON object")
+            kill_switch = state.get("kill_switch_enabled")
+            if kill_switch is not None and not isinstance(kill_switch, bool):
+                raise ValueError("kill_switch_enabled must be boolean")
+            if "date" in state:
+                persisted_date = state["date"]
+                if not isinstance(persisted_date, str):
+                    raise ValueError("date must be a string")
+                if date.fromisoformat(persisted_date).isoformat() != persisted_date:
+                    raise ValueError("date must use ISO format")
+            if "day_start_equity" in state:
+                day_start_equity = Decimal(str(state["day_start_equity"]))
+                if not day_start_equity.is_finite() or day_start_equity < 0:
+                    raise ValueError("day_start_equity must be finite and non-negative")
+            return state
+        except (InvalidOperation, OSError, json.JSONDecodeError, ValueError):
             logger.warning(
-                "Unable to read trading state; starting fresh"
+                "Unable to read trading state; activating kill switch"
             )
-            return {}
+            return {"kill_switch_enabled": True}
 
     def _save_state(self, state: dict[str, Any]) -> None:
         temporary = self.state_file.with_suffix(".tmp")
 
-        temporary.write_text(
-            json.dumps(state, indent=2),
-            encoding="utf-8",
-        )
-
-        temporary.replace(self.state_file)
+        try:
+            temporary.write_text(
+                json.dumps(state, indent=2),
+                encoding="utf-8",
+            )
+            temporary.replace(self.state_file)
+        except (OSError, TypeError, ValueError):
+            state["kill_switch_enabled"] = True
+            logger.exception(
+                "Unable to persist trading state; activating kill switch"
+            )
+            raise
 
     def _get_day_start_equity(
         self,
         current_equity: Decimal,
+        state: dict[str, Any] | None = None,
     ) -> Decimal:
         """Persist the first observed equity for each UTC trading day."""
 
         today = datetime.now(timezone.utc).date().isoformat()
-        state = self._load_state()
+        state = self._load_state() if state is None else state
+        kill_switch_added = "kill_switch_enabled" not in state
+        state.setdefault("kill_switch_enabled", False)
 
         if state.get("date") != today:
-            state = {
-                "date": today,
-                "day_start_equity": str(current_equity),
-            }
-            self._save_state(state)
-            return current_equity
-
-        try:
-            return Decimal(
-                str(state["day_start_equity"])
-            )
-        except (KeyError, ValueError):
             state["date"] = today
             state["day_start_equity"] = str(current_equity)
             self._save_state(state)
             return current_equity
+
+        try:
+            day_start_equity = Decimal(
+                str(state["day_start_equity"])
+            )
+            if kill_switch_added:
+                self._save_state(state)
+            return day_start_equity
+        except (InvalidOperation, KeyError, ValueError):
+            state["date"] = today
+            state["day_start_equity"] = str(current_equity)
+            self._save_state(state)
+            return current_equity
+
+    def _runtime_kill_switch_enabled(
+        self,
+        state: dict[str, Any] | None = None,
+    ) -> bool:
+        """Read the persisted switch, failing closed for invalid values."""
+
+        state = self._load_state() if state is None else state
+        value = state.get("kill_switch_enabled", False)
+        if isinstance(value, bool):
+            return value
+        logger.warning(
+            "Invalid runtime kill switch value; activating kill switch"
+        )
+        return True
 
     # ------------------------------------------------------------------
     # MT5 snapshots
@@ -217,6 +260,7 @@ class TradingEngine:
         self,
         account: AccountSnapshot,
     ) -> RiskState:
+        runtime_state = self._load_state()
         positions = mt5.positions_get()
 
         if positions is None:
@@ -248,14 +292,15 @@ class TradingEngine:
                 current_symbol_exposure += exposure
 
         day_start_equity = self._get_day_start_equity(
-            account.equity
+            account.equity,
+            state=runtime_state,
         )
 
         return RiskState(
             day_start_equity=day_start_equity,
             current_equity=account.equity,
             open_positions=len(positions),
-            kill_switch_enabled=False,
+            kill_switch_enabled=self._runtime_kill_switch_enabled(runtime_state),
             current_symbol_exposure=current_symbol_exposure,
             current_total_exposure=current_total_exposure,
         )
