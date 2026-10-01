@@ -8,7 +8,7 @@ from backend.app.strategy.models import StrategySignal
 from backend.app.trading.engine import TradingEngine
 
 
-def test_buy_path_dry_run() -> None:
+def test_buy_path_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = TradingEngine(
         symbol="EURUSD",
         timeframe="M15",
@@ -30,6 +30,11 @@ def test_buy_path_dry_run() -> None:
     engine.connect()
 
     try:
+        monkeypatch.setattr(
+            engine.executor.news_guard,
+            "is_news_blocked",
+            lambda **kwargs: (False, None),
+        )
         account = engine._account_snapshot()
 
         raw_symbol_meta = engine._symbol_metadata()
@@ -109,6 +114,7 @@ def test_buy_path_dry_run() -> None:
 
         assert execution_result["success"] is True
         assert execution_result["dry_run"] is True
+        assert execution_result["sent"] is False
 
     finally:
         engine.disconnect()

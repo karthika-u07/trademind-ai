@@ -24,15 +24,17 @@ def account(currency: str = "USD") -> AccountSnapshot:
     )
 
 
-def risk_state() -> RiskState:
-    return RiskState(
-        day_start_equity=Decimal("10000"),
-        current_equity=Decimal("10000"),
-        open_positions=0,
-        kill_switch_enabled=False,
-        current_symbol_exposure=Decimal("0"),
-        current_total_exposure=Decimal("0"),
-    )
+def risk_state(**overrides) -> RiskState:
+    values = {
+        "day_start_equity": Decimal("10000"),
+        "current_equity": Decimal("10000"),
+        "open_positions": 0,
+        "kill_switch_enabled": False,
+        "current_symbol_exposure": Decimal("0"),
+        "current_total_exposure": Decimal("0"),
+    }
+    values.update(overrides)
+    return RiskState(**values)
 
 
 def symbol_meta(*, currency_margin: str = "USD") -> SymbolRiskMetadata:
@@ -82,6 +84,90 @@ def test_risk_service_allows_trade_within_limits() -> None:
     assert result.reason_codes == ["RISK_ALLOWED"]
     assert result.planned_loss <= Decimal("500")
     assert result.normalized_volume > Decimal("0")
+
+
+def test_maximum_position_risk_blocks_excess_planned_loss() -> None:
+    service = RiskService(
+        RiskConfig(maximum_position_risk=Decimal("49"))
+    )
+
+    result = service.evaluate_trade(
+        strategy_signal=StrategySignal.BUY,
+        proposed_trade=trade(),
+        account=account(),
+        symbol_meta=symbol_meta(),
+        risk_state=risk_state(),
+    )
+
+    assert result.allowed is False
+    assert result.planned_loss == Decimal("50")
+    assert result.reason_codes == ["MAXIMUM_POSITION_RISK_REACHED"]
+
+
+def test_maximum_position_risk_allows_planned_loss_at_limit() -> None:
+    service = RiskService(
+        RiskConfig(maximum_position_risk=Decimal("50"))
+    )
+
+    result = service.evaluate_trade(
+        strategy_signal=StrategySignal.BUY,
+        proposed_trade=trade(),
+        account=account(),
+        symbol_meta=symbol_meta(),
+        risk_state=risk_state(),
+    )
+
+    assert result.allowed is True
+    assert result.planned_loss == Decimal("50")
+    assert result.reason_codes == ["RISK_ALLOWED"]
+
+
+@pytest.mark.parametrize(
+    ("config", "state", "reason"),
+    [
+        (
+            RiskConfig(),
+            risk_state(current_equity=Decimal("9700")),
+            "MAX_DAILY_DRAWDOWN_REACHED",
+        ),
+        (
+            RiskConfig(),
+            risk_state(current_equity=Decimal("10400")),
+            "MAX_DAILY_PROFIT_REACHED",
+        ),
+        (RiskConfig(), risk_state(kill_switch_enabled=True), "KILL_SWITCH_ACTIVE"),
+        (
+            RiskConfig(),
+            risk_state(open_positions=3),
+            "MAX_OPEN_POSITIONS_REACHED",
+        ),
+        (
+            RiskConfig(),
+            risk_state(current_symbol_exposure=Decimal("50001")),
+            "MAX_SYMBOL_EXPOSURE_REACHED",
+        ),
+        (
+            RiskConfig(max_symbol_exposure=Decimal("1000000")),
+            risk_state(current_total_exposure=Decimal("150001")),
+            "MAX_TOTAL_EXPOSURE_REACHED",
+        ),
+    ],
+)
+def test_existing_risk_protections_remain_enforced(
+    config: RiskConfig,
+    state: RiskState,
+    reason: str,
+) -> None:
+    result = RiskService(config).evaluate_trade(
+        strategy_signal=StrategySignal.BUY,
+        proposed_trade=trade(),
+        account=account(),
+        symbol_meta=symbol_meta(),
+        risk_state=state,
+    )
+
+    assert result.allowed is False
+    assert result.reason_codes == [reason]
 
 
 def test_risk_service_rejects_currency_mismatch() -> None:

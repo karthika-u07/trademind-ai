@@ -403,6 +403,24 @@ class RiskService:
                 risk_state=risk_state,
                 timestamp=ts,
             )
+        if planned_loss > self.config.maximum_position_risk:
+            return self._decision(
+                allowed=False,
+                reason_codes=["MAXIMUM_POSITION_RISK_REACHED"],
+                risk_amount=risk_amount,
+                proposed_trade=proposed_trade,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                stop_distance=stop_distance,
+                daily_drawdown=daily_drawdown,
+                daily_profit=daily_profit,
+                raw_volume=raw_volume,
+                normalized_volume=final_volume,
+                planned_loss=planned_loss,
+                planned_reward=Decimal("0"),
+                risk_state=risk_state,
+                timestamp=ts,
+            )
 
         exposure = calculate_exposure_notional(proposed_trade.entry_price, final_volume, symbol_meta.contract_size)
         current_symbol_exposure = risk_state.current_symbol_exposure or Decimal("0")
