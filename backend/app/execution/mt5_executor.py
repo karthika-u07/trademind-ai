@@ -1,7 +1,9 @@
 import csv
 import logging
+import math
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from threading import Lock
 from typing import Optional
@@ -27,6 +29,8 @@ REQUIRED_CALENDAR_COLUMNS = {
     "impact",
     "scheduled_at",
 }
+MAX_TICK_AGE_SECONDS = 5.0
+MAX_BROKER_CLOCK_OFFSET_HOURS = 14
 
 
 class MT5Executor:
@@ -44,6 +48,8 @@ class MT5Executor:
     ):
         self.dry_run = dry_run
         self.connected = False
+        self.max_spread_points = Decimal(str(settings.max_spread_points))
+        self.max_slippage_points = Decimal(str(settings.max_slippage_points))
         self.calendar_file = calendar_file or settings.news_calendar_file
         self.calendar_refresh_seconds = (
             calendar_refresh_seconds
@@ -53,6 +59,8 @@ class MT5Executor:
         self._calendar_mtime_ns: int | None = None
         self._last_calendar_check = 0.0
         self._calendar_refresh_lock = Lock()
+        self._calendar_verified = False
+        self._calendar_refresh_healthy = False
 
         self.news_guard = NewsGuard(
             before_minutes=settings.news_block_before_minutes,
@@ -170,10 +178,12 @@ class MT5Executor:
             try:
                 modified_at = self.calendar_file.stat().st_mtime_ns
             except OSError as error:
+                self._calendar_refresh_healthy = False
                 logger.warning("News calendar refresh failed: %s", error)
                 return False
 
             if modified_at == self._calendar_mtime_ns:
+                self._calendar_refresh_healthy = True
                 return False
 
             try:
@@ -182,11 +192,22 @@ class MT5Executor:
                     raise_on_error=True,
                 )
             except Exception as error:
+                self._calendar_refresh_healthy = False
                 logger.warning("News calendar refresh failed: %s", error)
+                return False
+
+            if not events:
+                self._calendar_refresh_healthy = False
+                logger.warning(
+                    "News calendar refresh returned no events; "
+                    "preserving last known valid calendar"
+                )
                 return False
 
             previous_mtime = self._calendar_mtime_ns
             self._calendar_mtime_ns = modified_at
+            self._calendar_verified = True
+            self._calendar_refresh_healthy = True
 
             if events == self.news_guard.events:
                 if previous_mtime is None:
@@ -532,7 +553,7 @@ class MT5Executor:
                 if take_profit is not None
                 else 0.0
             ),
-            "deviation": 20,
+            "deviation": math.floor(self.max_slippage_points),
             "magic": 20260912,
             "comment": "TradeMind AI dry-run order",
             "type_time": mt5.ORDER_TIME_GTC,
@@ -596,7 +617,45 @@ class MT5Executor:
         if not self.connected:
             raise RuntimeError("MT5 is not connected")
 
+        if self.dry_run:
+            news_rejection = self._news_safety_rejection(request)
+            if news_rejection is not None:
+                return news_rejection
+
+        result = self.send_order(request)
+
+        if result.get("blocked"):
+            return result
+
+        print(
+            "\n✅ TRADING ALLOWED | "
+            "No blocking news detected"
+        )
+
+        result["trading_allowed"] = True
+        result["blocked"] = False
+
+        return result
+
+    def _news_safety_rejection(self, request: dict) -> dict | None:
         self.refresh_calendar_events()
+
+        if (
+            self._calendar_verified is not True
+            or self._calendar_refresh_healthy is not True
+        ):
+            logger.warning(
+                "Market order rejected reason=news_calendar_unavailable"
+            )
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": self.dry_run,
+                "reason": "news_calendar_unavailable",
+                "comment": "Economic calendar safety state is unavailable",
+            }
 
         currencies = extract_symbol_currencies(
             str(request.get("symbol", ""))
@@ -604,40 +663,409 @@ class MT5Executor:
         blocked, event = self.news_guard.is_news_blocked(
             currencies=currencies
         )
+        if not blocked:
+            return None
 
-        if blocked:
-            message = (
-                "TRADING STOPPED | "
-                "High-impact news detected | "
-                f"{event.title} | "
-                f"{event.currency} | "
-                f"{event.event_time.isoformat()}"
+        message = (
+            "TRADING STOPPED | "
+            "High-impact news detected | "
+            f"{event.title} | "
+            f"{event.currency} | "
+            f"{event.event_time.isoformat()}"
+        )
+        print(f"\n🚫 {message}")
+        return {
+            "success": False,
+            "trading_allowed": False,
+            "blocked": True,
+            "sent": False,
+            "dry_run": self.dry_run,
+            "reason": "high_impact_news",
+            "event": event.title,
+            "currency": event.currency,
+            "event_time": event.event_time.isoformat(),
+        }
+
+    def _market_safety_rejection(self, request: dict) -> dict | None:
+        symbol = str(request.get("symbol", "")).strip().upper()
+        rejection_reason: str | None = None
+        spread_points: Decimal | None = None
+        tick_age_seconds: float | None = None
+        broker_clock_offset_seconds: int | None = None
+
+        symbol_info = mt5.symbol_info(symbol) if symbol else None
+        tick = mt5.symbol_info_tick(symbol) if symbol else None
+
+        if symbol_info is None:
+            rejection_reason = "symbol_metadata_unavailable"
+        else:
+            try:
+                point = Decimal(str(symbol_info.point))
+                if not symbol or not point.is_finite() or point <= 0:
+                    rejection_reason = "symbol_metadata_invalid"
+            except (AttributeError, InvalidOperation, TypeError, ValueError):
+                rejection_reason = "symbol_metadata_invalid"
+
+        if rejection_reason is None and tick is None:
+            rejection_reason = "tick_data_unavailable"
+
+        try:
+            bid = Decimal(str(tick.bid))
+            ask = Decimal(str(tick.ask))
+            if (
+                rejection_reason is None
+                and (
+                    not bid.is_finite()
+                    or bid <= 0
+                    or not ask.is_finite()
+                    or ask < bid
+                )
+            ):
+                rejection_reason = "invalid_tick_data"
+            elif rejection_reason is None:
+                spread_points = (ask - bid) / point
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            if rejection_reason is None:
+                rejection_reason = "invalid_tick_data"
+
+        if rejection_reason is None:
+            raw_tick_time = getattr(tick, "time_msc", None)
+            try:
+                tick_timestamp = float(raw_tick_time) / 1000.0
+                raw_tick_age_seconds = time.time() - tick_timestamp
+                broker_clock_offset_hours = round(
+                    raw_tick_age_seconds / (60 * 60)
+                )
+                broker_clock_offset_seconds = (
+                    broker_clock_offset_hours * 60 * 60
+                )
+                tick_age_seconds = (
+                    raw_tick_age_seconds - broker_clock_offset_seconds
+                )
+                if (
+                    not math.isfinite(tick_timestamp)
+                    or not math.isfinite(tick_age_seconds)
+                    or tick_timestamp <= 0
+                    or abs(broker_clock_offset_hours)
+                    > MAX_BROKER_CLOCK_OFFSET_HOURS
+                    or tick_age_seconds < -MAX_TICK_AGE_SECONDS
+                    or tick_age_seconds > MAX_TICK_AGE_SECONDS
+                ):
+                    rejection_reason = "stale_tick_data"
+            except (TypeError, ValueError):
+                rejection_reason = "invalid_tick_data"
+
+        if (
+            rejection_reason is None
+            and spread_points is not None
+            and spread_points > self.max_spread_points
+        ):
+            rejection_reason = "spread_limit_exceeded"
+
+        if rejection_reason is None:
+            logger.debug(
+                "Market safety check passed symbol=%s spread_points=%s "
+                "max_spread_points=%s tick_age_seconds=%.3f "
+                "broker_clock_offset_seconds=%s",
+                symbol,
+                spread_points,
+                self.max_spread_points,
+                tick_age_seconds,
+                broker_clock_offset_seconds,
             )
+            return None
 
-            print(f"\n🚫 {message}")
+        logger.warning(
+            "Market order rejected reason=%s symbol=%s spread_points=%s "
+            "max_spread_points=%s tick_age_seconds=%s "
+            "broker_clock_offset_seconds=%s",
+            rejection_reason,
+            symbol or None,
+            spread_points,
+            self.max_spread_points,
+            tick_age_seconds,
+            broker_clock_offset_seconds,
+        )
+        return {
+            "success": False,
+            "trading_allowed": False,
+            "blocked": True,
+            "sent": False,
+            "dry_run": self.dry_run,
+            "reason": rejection_reason,
+            "symbol": symbol or None,
+            "spread_points": (
+                str(spread_points) if spread_points is not None else None
+            ),
+            "max_spread_points": str(self.max_spread_points),
+            "tick_age_seconds": tick_age_seconds,
+            "broker_clock_offset_seconds": broker_clock_offset_seconds,
+            "comment": "Market safety check rejected order",
+        }
 
+    def _position_data_rejection(self, request: dict) -> dict | None:
+        try:
+            positions = mt5.positions_get()
+        except Exception as error:
+            logger.warning(
+                "Market order rejected reason=position_data_unavailable "
+                "error=%s",
+                error,
+            )
+            positions = None
+
+        if positions is None:
             return {
                 "success": False,
                 "trading_allowed": False,
                 "blocked": True,
                 "sent": False,
-                "reason": "high_impact_news",
-                "event": event.title,
-                "currency": event.currency,
-                "event_time": event.event_time.isoformat(),
+                "dry_run": False,
+                "reason": "position_data_unavailable",
+                "comment": "Broker position data is unavailable",
             }
 
-        print(
-            "\n✅ TRADING ALLOWED | "
-            "No blocking news detected"
-        )
+        current_symbol_exposure = Decimal("0")
+        current_total_exposure = Decimal("0")
+        target_symbol = str(request.get("symbol", "")).strip().upper()
 
-        result = self.send_order(request)
+        try:
+            for position in positions:
+                position_symbol = str(
+                    getattr(position, "symbol", "")
+                ).strip().upper()
+                volume = Decimal(str(getattr(position, "volume", None)))
+                price = Decimal(
+                    str(getattr(position, "price_current", None))
+                )
+                if (
+                    not position_symbol
+                    or not volume.is_finite()
+                    or volume <= 0
+                    or not price.is_finite()
+                    or price <= 0
+                ):
+                    raise ValueError("invalid position fields")
 
-        result["trading_allowed"] = True
-        result["blocked"] = False
+                try:
+                    symbol_info = mt5.symbol_info(position_symbol)
+                except Exception as error:
+                    logger.warning(
+                        "Market order rejected reason=symbol_metadata_unavailable "
+                        "symbol=%s error=%s",
+                        position_symbol,
+                        error,
+                    )
+                    symbol_info = None
+                if symbol_info is None:
+                    return {
+                        "success": False,
+                        "trading_allowed": False,
+                        "blocked": True,
+                        "sent": False,
+                        "dry_run": False,
+                        "reason": "symbol_metadata_unavailable",
+                        "symbol": position_symbol,
+                        "comment": "Open-position symbol metadata is unavailable",
+                    }
 
-        return result
+                contract_size = Decimal(
+                    str(getattr(symbol_info, "trade_contract_size", None))
+                )
+                if not contract_size.is_finite() or contract_size <= 0:
+                    return {
+                        "success": False,
+                        "trading_allowed": False,
+                        "blocked": True,
+                        "sent": False,
+                        "dry_run": False,
+                        "reason": "symbol_metadata_invalid",
+                        "symbol": position_symbol,
+                        "comment": "Open-position symbol metadata is invalid",
+                    }
+
+                exposure = volume * price * contract_size
+                if not exposure.is_finite() or exposure <= 0:
+                    raise ValueError("invalid position exposure")
+                current_total_exposure += exposure
+                if position_symbol == target_symbol:
+                    current_symbol_exposure += exposure
+        except (InvalidOperation, TypeError, ValueError):
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "position_data_invalid",
+                "comment": "Broker position data is invalid",
+            }
+
+        try:
+            target_info = mt5.symbol_info(target_symbol) if target_symbol else None
+        except Exception as error:
+            logger.warning(
+                "Market order rejected reason=symbol_metadata_unavailable "
+                "symbol=%s error=%s",
+                target_symbol or None,
+                error,
+            )
+            target_info = None
+        if target_info is None:
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "symbol_metadata_unavailable",
+                "symbol": target_symbol or None,
+                "comment": "Target symbol metadata is unavailable",
+            }
+
+        try:
+            point = Decimal(str(target_info.point))
+            tick_size = Decimal(str(target_info.trade_tick_size))
+            tick_value = Decimal(str(target_info.trade_tick_value))
+            contract_size = Decimal(str(target_info.trade_contract_size))
+            volume_min = Decimal(str(target_info.volume_min))
+            volume_max = Decimal(str(target_info.volume_max))
+            volume_step = Decimal(str(target_info.volume_step))
+            raw_digits = Decimal(str(target_info.digits))
+            digits = int(raw_digits)
+            required_values = (
+                point,
+                tick_size,
+                tick_value,
+                contract_size,
+                volume_min,
+                volume_max,
+                volume_step,
+            )
+            if (
+                any(not value.is_finite() or value <= 0 for value in required_values)
+                or volume_max < volume_min
+                or not raw_digits.is_finite()
+                or raw_digits != digits
+                or digits < 0
+                or digits > 8
+            ):
+                raise ValueError("invalid target symbol metadata")
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "symbol_metadata_invalid",
+                "symbol": target_symbol or None,
+                "comment": "Target symbol metadata is invalid",
+            }
+
+        try:
+            order_volume = Decimal(str(request.get("volume")))
+            order_price = Decimal(str(request.get("price")))
+            volume_steps = (order_volume - volume_min) / volume_step
+            if (
+                not order_volume.is_finite()
+                or order_volume < volume_min
+                or order_volume > volume_max
+                or volume_steps != volume_steps.to_integral_value()
+                or not order_price.is_finite()
+                or order_price <= 0
+            ):
+                raise ValueError("invalid order volume or price")
+        except (InvalidOperation, TypeError, ValueError):
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "order_volume_invalid",
+                "symbol": target_symbol or None,
+                "comment": "Order volume violates broker constraints",
+            }
+
+        if len(positions) >= settings.max_open_positions:
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "max_open_positions_reached",
+                "comment": "Maximum open position limit reached",
+            }
+
+        try:
+            target_tick = mt5.symbol_info_tick(target_symbol)
+        except Exception:
+            target_tick = None
+        if target_tick is None:
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "tick_data_unavailable",
+                "symbol": target_symbol,
+                "comment": "Current target tick is unavailable for exposure",
+            }
+
+        try:
+            current_bid = Decimal(str(target_tick.bid))
+            current_ask = Decimal(str(target_tick.ask))
+            if (
+                not current_bid.is_finite()
+                or current_bid <= 0
+                or not current_ask.is_finite()
+                or current_ask < current_bid
+            ):
+                raise ValueError("invalid target tick")
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "invalid_tick_data",
+                "symbol": target_symbol,
+                "comment": "Current target tick is invalid for exposure",
+            }
+
+        exposure_price = max(order_price, current_bid, current_ask)
+        proposed_exposure = exposure_price * order_volume * contract_size
+        if current_symbol_exposure + proposed_exposure > Decimal(
+            str(settings.max_symbol_exposure)
+        ):
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "max_symbol_exposure_reached",
+                "symbol": target_symbol,
+                "comment": "Maximum symbol exposure limit reached",
+            }
+        if current_total_exposure + proposed_exposure > Decimal(
+            str(settings.max_total_exposure)
+        ):
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": "max_total_exposure_reached",
+                "comment": "Maximum total exposure limit reached",
+            }
+
+        return None
 
     def send_order(self, request: dict) -> dict:
         """
@@ -646,6 +1074,40 @@ class MT5Executor:
 
         if not self.connected:
             raise RuntimeError("MT5 is not connected")
+
+        if not self.dry_run:
+            execution_gate = ExecutionGate.from_settings()
+            if (
+                settings.live_execution_allowed is not True
+                or execution_gate.is_live_allowed() is not True
+            ):
+                logger.warning(
+                    "Market order rejected reason=live_execution_not_authorized "
+                    "trading_mode=%s live_trading_enabled=%s",
+                    settings.trading_mode,
+                    settings.live_trading_enabled,
+                )
+                return {
+                    "success": False,
+                    "trading_allowed": False,
+                    "blocked": True,
+                    "sent": False,
+                    "dry_run": False,
+                    "reason": "live_execution_not_authorized",
+                    "comment": "Live market order denied by execution policy",
+                }
+
+            news_rejection = self._news_safety_rejection(request)
+            if news_rejection is not None:
+                return news_rejection
+
+            position_rejection = self._position_data_rejection(request)
+            if position_rejection is not None:
+                return position_rejection
+
+        safety_rejection = self._market_safety_rejection(request)
+        if safety_rejection is not None:
+            return safety_rejection
 
         if self.dry_run:
             print(
