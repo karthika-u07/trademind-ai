@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import namedtuple
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -18,6 +20,9 @@ from backend.app.correlation.service import (
 from backend.app.execution import mt5_executor
 from backend.app.execution.mt5_executor import MT5Executor
 from backend.app.execution.news_guard import NewsGuard
+from backend.app.strategy.models import StrategySignal
+from backend.app.trading import engine as trading_engine
+from backend.app.trading.engine import TradingEngine
 
 
 def prices_from_returns(returns: list[float]) -> list[float]:
@@ -216,6 +221,7 @@ def test_resulting_correlated_positions_at_limit_are_allowed() -> None:
 
 def test_high_correlation_blocks_market_order(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     configure_correlation(monkeypatch)
     history = candles([0.001, 0.002, 0.003, 0.004, 0.005])
@@ -225,16 +231,42 @@ def test_high_correlation_blocks_market_order(
         open_candles=history,
     )
 
-    result = send(executor())
+    with caplog.at_level(logging.WARNING, logger=mt5_executor.__name__):
+        result = send(executor())
 
     assert result["sent"] is False
     assert result["reason"] == "correlated_position_limit_reached"
+    assert result["candidate_symbol"] == "EURUSD"
+    assert result["timeframe"] == "H1"
+    assert result["threshold"] == 0.8
+    assert result["max_correlated_positions"] == 1
+    assert result["max_correlated_exposure"] == "1000000"
     assert result["correlated_symbols"] == ["GBPUSD"]
     assert result["correlated_positions"] == 2
+    assert result["correlations"]["GBPUSD"] == pytest.approx(1.0)
+
+    audit_record = next(
+        record
+        for record in caplog.records
+        if "event=correlation_risk_decision" in record.getMessage()
+    )
+    audit_message = audit_record.getMessage()
+    assert audit_record.levelno == logging.WARNING
+    assert "allowed=False" in audit_message
+    assert "reason=correlated_position_limit_reached" in audit_message
+    assert "candidate_symbol=EURUSD" in audit_message
+    assert "timeframe=H1" in audit_message
+    assert "threshold=0.8" in audit_message
+    assert "max_correlated_positions=1" in audit_message
+    assert "max_correlated_exposure=1000000" in audit_message
+    assert "resulting_cluster_size=2" in audit_message
+    assert "correlated_symbols=('GBPUSD',)" in audit_message
+    assert "correlations={'GBPUSD':" in audit_message
 
 
 def test_low_correlation_allows_market_order(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     configure_correlation(monkeypatch)
     sent_requests = []
@@ -249,11 +281,25 @@ def test_low_correlation_allows_market_order(
         ),
     )
 
-    result = send(executor())
+    with caplog.at_level(logging.DEBUG, logger=mt5_executor.__name__):
+        result = send(executor())
 
     assert result["success"] is True
     assert result["sent"] is True
     assert len(sent_requests) == 1
+
+    audit_record = next(
+        record
+        for record in caplog.records
+        if "event=correlation_risk_decision" in record.getMessage()
+    )
+    audit_message = audit_record.getMessage()
+    assert audit_record.levelno == logging.DEBUG
+    assert "allowed=True" in audit_message
+    assert "reason=None" in audit_message
+    assert "candidate_symbol=EURUSD" in audit_message
+    assert "resulting_cluster_size=1" in audit_message
+    assert "correlations={'GBPUSD':" in audit_message
 
 
 def test_split_positions_for_one_correlated_symbol_count_once(
@@ -281,27 +327,52 @@ def test_split_positions_for_one_correlated_symbol_count_once(
 
 
 @pytest.mark.parametrize(
-    ("candidate_history", "open_history", "reason"),
+    (
+        "candidate_history",
+        "open_history",
+        "reason",
+        "data_issue",
+        "observed_samples",
+    ),
     [
-        (None, candles([0.001] * 5), "correlation_data_unavailable"),
-        (candles([0.001] * 3), candles([0.001] * 3), "correlation_history_insufficient"),
+        (
+            None,
+            candles([0.001] * 5),
+            "correlation_data_unavailable",
+            "candles_unavailable",
+            0,
+        ),
+        (
+            candles([0.001] * 3),
+            candles([0.001] * 3),
+            "correlation_history_insufficient",
+            "insufficient_candles",
+            4,
+        ),
         (
             candles([0.001] * 5, invalid_close=math.nan),
             candles([0.001] * 5),
             "correlation_data_invalid",
+            "invalid_candle_value",
+            6,
         ),
         (
             candles([0.001] * 5, age_seconds=10800),
             candles([0.001] * 5, age_seconds=10800),
             "correlation_data_stale",
+            "stale_history",
+            6,
         ),
     ],
 )
 def test_invalid_correlation_data_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     candidate_history,
     open_history,
     reason: str,
+    data_issue: str,
+    observed_samples: int,
 ) -> None:
     configure_correlation(monkeypatch)
     install_market(
@@ -310,14 +381,61 @@ def test_invalid_correlation_data_fails_closed(
         open_candles=open_history,
     )
 
-    result = send(executor())
+    with caplog.at_level(logging.WARNING, logger=mt5_executor.__name__):
+        result = send(executor())
 
     assert result["sent"] is False
     assert result["reason"] == reason
+    assert result["candidate_symbol"] == "EURUSD"
+    assert result["timeframe"] == "H1"
+    assert result["symbol"] == "EURUSD"
+    assert result["required_samples"] == 6
+    assert result["observed_samples"] == observed_samples
+    assert result["data_issue"] == data_issue
+    if reason == "correlation_data_stale":
+        assert result["data_age_seconds"] > 7200
+        assert result["max_data_age_seconds"] == 7200
+
+    log_text = "\n".join(caplog.messages)
+    assert "event=correlation_risk_data_failure" in log_text
+    assert f"reason={reason}" in log_text
+    assert "candidate_symbol=EURUSD" in log_text
+    assert "timeframe=H1" in log_text
+    assert f"'data_issue': '{data_issue}'" in log_text
+
+
+def test_misaligned_correlation_history_has_safe_context(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    configure_correlation(monkeypatch)
+    candidate_history = candles([0.001, 0.002, 0.003, 0.004, 0.005])
+    open_history = [
+        {**candle, "time": int(candle["time"]) + 60}
+        for candle in candidate_history
+    ]
+    install_market(
+        monkeypatch,
+        candidate_candles=candidate_history,
+        open_candles=open_history,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=mt5_executor.__name__):
+        result = send(executor())
+
+    assert result["sent"] is False
+    assert result["reason"] == "correlation_history_insufficient"
+    assert result["candidate_symbol"] == "EURUSD"
+    assert result["comparison_symbol"] == "GBPUSD"
+    assert result["required_samples"] == 5
+    assert result["observed_samples"] == 0
+    assert result["data_issue"] == "misaligned_history"
+    assert "'data_issue': 'misaligned_history'" in caplog.text
 
 
 def test_candle_loading_exception_blocks_live_submission(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     configure_correlation(monkeypatch)
     history = candles([0.001, 0.002, 0.003, 0.004, 0.005])
@@ -328,15 +446,22 @@ def test_candle_loading_exception_blocks_live_submission(
     )
 
     def fail_loading(symbol, timeframe, start, count):
-        raise RuntimeError("rates unavailable")
+        raise RuntimeError("broker account 123 secret")
 
     monkeypatch.setattr(mt5_executor.mt5, "copy_rates_from_pos", fail_loading)
 
-    result = send(executor())
+    with caplog.at_level(logging.WARNING, logger=mt5_executor.__name__):
+        result = send(executor())
 
     assert result["success"] is False
     assert result["sent"] is False
     assert result["reason"] == "correlation_data_unavailable"
+    assert result["symbol"] == "EURUSD"
+    assert result["required_samples"] == 6
+    assert result["data_issue"] == "candle_load_failed"
+    assert result["exception_type"] == "RuntimeError"
+    assert "broker account 123 secret" not in str(result)
+    assert "broker account 123 secret" not in caplog.text
 
 
 def test_missing_correlation_timeframe_blocks_live_submission(
@@ -396,6 +521,114 @@ def test_correlated_exposure_limit_blocks_market_order(
     assert result["sent"] is False
     assert result["reason"] == "correlated_exposure_limit_reached"
     assert Decimal(result["correlated_exposure"]) > Decimal(20000)
+
+
+def test_correlation_rejection_details_survive_execute_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_correlation(monkeypatch)
+    history = candles([0.001, 0.002, 0.003, 0.004, 0.005])
+    install_market(
+        monkeypatch,
+        candidate_candles=history,
+        open_candles=history,
+    )
+
+    result = executor().execute_order(
+        {"symbol": "EURUSD", "volume": 0.1, "price": 1.1002}
+    )
+
+    assert result["reason"] == "correlated_position_limit_reached"
+    assert result["candidate_symbol"] == "EURUSD"
+    assert result["timeframe"] == "H1"
+    assert result["correlated_symbols"] == ["GBPUSD"]
+    assert result["correlated_positions"] == 2
+    assert result["correlations"]["GBPUSD"] == pytest.approx(1.0)
+
+
+def test_correlation_rejection_details_survive_trading_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candle_time = datetime.now(timezone.utc)
+    strategy_result = SimpleNamespace(
+        signal=StrategySignal.BUY,
+        confidence=0.9,
+        feature_ready=True,
+        atr=0.001,
+        reason_codes=[],
+    )
+    regime = SimpleNamespace(regime="TRENDING_BULLISH")
+    risk_decision = SimpleNamespace(
+        allowed=True,
+        reason_codes=["RISK_ALLOWED"],
+        normalized_volume=Decimal("0.1"),
+        stop_loss=Decimal("1.09"),
+        take_profit=Decimal("1.12"),
+    )
+    rejection = {
+        "success": False,
+        "trading_allowed": False,
+        "blocked": True,
+        "sent": False,
+        "dry_run": False,
+        "reason": "correlated_position_limit_reached",
+        "candidate_symbol": "EURUSD",
+        "timeframe": "H1",
+        "correlated_symbols": ["GBPUSD"],
+        "correlated_positions": 2,
+        "correlated_exposure": "23750.0",
+        "correlations": {"GBPUSD": 1.0},
+        "comment": "Correlation risk limit reached",
+    }
+
+    instance = object.__new__(TradingEngine)
+    instance._connected = True
+    instance._last_processed_candle = None
+    instance.symbol = "EURUSD"
+    instance.dry_run = False
+    instance._run_analysis = lambda: (
+        [{"timestamp": candle_time, "high": 1.11, "low": 1.10}],
+        None,
+        regime,
+        strategy_result,
+    )
+    instance.market = SimpleNamespace(
+        get_current_price=lambda symbol: {
+            "bid": 1.10,
+            "ask": 1.1002,
+            "mid": 1.1001,
+        }
+    )
+    instance._account_snapshot = lambda: object()
+    instance._symbol_metadata = lambda: object()
+    instance._risk_state = lambda account: object()
+    instance.risk = SimpleNamespace(evaluate_trade=lambda **kwargs: risk_decision)
+    instance.executor = SimpleNamespace(
+        prepare_market_order=lambda **kwargs: {"symbol": kwargs["symbol"]},
+        check_order=lambda request: {"retcode": 0},
+        execute_order=lambda request: rejection,
+    )
+    monkeypatch.setattr(
+        trading_engine,
+        "ProposedTrade",
+        lambda **kwargs: SimpleNamespace(
+            recent_high=kwargs["recent_high"],
+            recent_low=kwargs["recent_low"],
+            atr=kwargs["atr"],
+        ),
+    )
+    monkeypatch.setattr(
+        trading_engine,
+        "MarketSnapshot",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    result = instance.run_once()
+
+    assert result["status"] == "EXECUTION_REJECTED"
+    assert result["execution"] is rejection
+    assert result["execution"]["reason"] == "correlated_position_limit_reached"
+    assert result["execution"]["correlations"] == {"GBPUSD": 1.0}
 
 
 def test_disabled_correlation_protection_preserves_existing_behavior(

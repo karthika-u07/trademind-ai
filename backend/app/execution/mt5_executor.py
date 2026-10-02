@@ -1102,14 +1102,19 @@ class MT5Executor:
         if timeframe is None:
             reason = "correlation_data_unavailable"
             logger.warning(
-                "Market order rejected reason=%s detail=unsupported_timeframe "
-                "timeframe=%s",
+                "event=correlation_risk_data_failure reason=%s "
+                "candidate_symbol=%s timeframe=%s "
+                "data_issue=unsupported_timeframe",
                 reason,
+                target_symbol,
                 settings.correlation_timeframe,
             )
             return self._correlation_rejection_result(
                 reason=reason,
                 comment="Correlation timeframe is unavailable",
+                candidate_symbol=target_symbol,
+                timeframe=settings.correlation_timeframe,
+                data_issue="unsupported_timeframe",
             )
 
         protection = CorrelationProtection(
@@ -1136,7 +1141,13 @@ class MT5Executor:
             except Exception as error:
                 raise CorrelationDataError(
                     "correlation_data_unavailable",
-                    f"Correlation candles are unavailable for {symbol}: {error}",
+                    f"Correlation candles are unavailable for {symbol}",
+                    context={
+                        "symbol": symbol,
+                        "required_samples": count,
+                        "data_issue": "candle_load_failed",
+                        "exception_type": type(error).__name__,
+                    },
                 ) from error
 
         try:
@@ -1148,37 +1159,57 @@ class MT5Executor:
             )
         except CorrelationDataError as error:
             logger.warning(
-                "Market order rejected reason=%s detail=%s",
+                "event=correlation_risk_data_failure reason=%s "
+                "candidate_symbol=%s timeframe=%s detail=%s context=%s",
                 error.reason,
+                target_symbol,
+                settings.correlation_timeframe,
                 error.detail,
+                error.context,
             )
             return self._correlation_rejection_result(
                 reason=error.reason,
                 comment=error.detail,
+                candidate_symbol=target_symbol,
+                timeframe=settings.correlation_timeframe,
+                **error.context,
             )
 
+        correlations = dict(decision.correlations)
+        log_decision = logger.debug if decision.allowed else logger.warning
+        log_decision(
+            "event=correlation_risk_decision allowed=%s reason=%s "
+            "candidate_symbol=%s timeframe=%s threshold=%s "
+            "max_correlated_positions=%s max_correlated_exposure=%s "
+            "resulting_cluster_size=%s correlated_symbols=%s "
+            "correlated_exposure=%s correlations=%s",
+            decision.allowed,
+            decision.reason,
+            target_symbol,
+            settings.correlation_timeframe,
+            settings.correlation_threshold,
+            settings.max_correlated_positions,
+            settings.max_correlated_exposure,
+            decision.correlated_positions,
+            decision.correlated_symbols,
+            decision.correlated_exposure,
+            correlations,
+        )
         if decision.allowed:
             return None
 
-        logger.warning(
-            "Market order rejected reason=%s correlated_symbols=%s "
-            "correlated_positions=%s correlated_exposure=%s correlations=%s",
-            decision.reason,
-            decision.correlated_symbols,
-            decision.correlated_positions,
-            decision.correlated_exposure,
-            decision.correlations,
-        )
         return self._correlation_rejection_result(
             reason=str(decision.reason),
             comment="Correlation risk limit reached",
+            candidate_symbol=target_symbol,
+            timeframe=settings.correlation_timeframe,
+            threshold=settings.correlation_threshold,
+            max_correlated_positions=settings.max_correlated_positions,
+            max_correlated_exposure=str(settings.max_correlated_exposure),
             correlated_symbols=list(decision.correlated_symbols),
             correlated_positions=decision.correlated_positions,
             correlated_exposure=str(decision.correlated_exposure),
-            correlations={
-                symbol: correlation
-                for symbol, correlation in decision.correlations
-            },
+            correlations=correlations,
         )
 
     def _correlation_rejection_result(

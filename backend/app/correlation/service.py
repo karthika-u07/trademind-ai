@@ -40,10 +40,17 @@ class CorrelationDecision:
 
 
 class CorrelationDataError(ValueError):
-    def __init__(self, reason: str, detail: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        detail: str,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+        self.context = dict(context or {})
 
 
 class CorrelationProtection:
@@ -87,10 +94,19 @@ class CorrelationProtection:
                     position.symbol,
                     candle_loader(position.symbol, candle_count),
                 )
-            correlation = self._correlation(
-                candidate_returns,
-                returns_by_symbol[position.symbol],
-            )
+            try:
+                correlation = self._correlation(
+                    candidate_returns,
+                    returns_by_symbol[position.symbol],
+                )
+            except CorrelationDataError as error:
+                context = dict(error.context)
+                context["comparison_symbol"] = position.symbol
+                raise CorrelationDataError(
+                    error.reason,
+                    error.detail,
+                    context=context,
+                ) from error
             correlations[position.symbol] = correlation
             if abs(correlation) >= self.config.threshold:
                 correlated_positions.append(position)
@@ -142,11 +158,23 @@ class CorrelationProtection:
             raise CorrelationDataError(
                 "correlation_data_unavailable",
                 f"Correlation candles are unavailable for {symbol}",
+                context={
+                    "symbol": symbol,
+                    "required_samples": self.config.min_samples + 1,
+                    "observed_samples": 0,
+                    "data_issue": "candles_unavailable",
+                },
             )
         if len(candles) < self.config.min_samples + 1:
             raise CorrelationDataError(
                 "correlation_history_insufficient",
                 f"Correlation history is insufficient for {symbol}",
+                context={
+                    "symbol": symbol,
+                    "required_samples": self.config.min_samples + 1,
+                    "observed_samples": len(candles),
+                    "data_issue": "insufficient_candles",
+                },
             )
 
         normalized: list[tuple[int, float]] = []
@@ -167,7 +195,13 @@ class CorrelationProtection:
         ) as error:
             raise CorrelationDataError(
                 "correlation_data_invalid",
-                f"Correlation candles are invalid for {symbol}: {error}",
+                f"Correlation candles are invalid for {symbol}",
+                context={
+                    "symbol": symbol,
+                    "required_samples": self.config.min_samples + 1,
+                    "observed_samples": len(candles),
+                    "data_issue": "invalid_candle_value",
+                },
             ) from error
 
         timestamps = [timestamp for timestamp, _ in normalized]
@@ -175,6 +209,12 @@ class CorrelationProtection:
             raise CorrelationDataError(
                 "correlation_data_invalid",
                 f"Correlation timestamps are invalid for {symbol}",
+                context={
+                    "symbol": symbol,
+                    "required_samples": self.config.min_samples + 1,
+                    "observed_samples": len(normalized),
+                    "data_issue": "invalid_timestamps",
+                },
             )
 
         age_seconds = time.time() - timestamps[-1]
@@ -182,11 +222,25 @@ class CorrelationProtection:
             raise CorrelationDataError(
                 "correlation_data_invalid",
                 f"Correlation timestamp is invalid for {symbol}",
+                context={
+                    "symbol": symbol,
+                    "required_samples": self.config.min_samples + 1,
+                    "observed_samples": len(normalized),
+                    "data_issue": "invalid_latest_timestamp",
+                },
             )
         if age_seconds > self.config.max_data_age_seconds:
             raise CorrelationDataError(
                 "correlation_data_stale",
                 f"Correlation history is stale for {symbol}",
+                context={
+                    "symbol": symbol,
+                    "required_samples": self.config.min_samples + 1,
+                    "observed_samples": len(normalized),
+                    "data_age_seconds": round(age_seconds, 3),
+                    "max_data_age_seconds": self.config.max_data_age_seconds,
+                    "data_issue": "stale_history",
+                },
             )
 
         returns: dict[int, float] = {}
@@ -198,6 +252,12 @@ class CorrelationProtection:
                 raise CorrelationDataError(
                     "correlation_data_invalid",
                     f"Correlation return is invalid for {symbol}",
+                    context={
+                        "symbol": symbol,
+                        "required_samples": self.config.min_samples,
+                        "observed_samples": len(returns),
+                        "data_issue": "invalid_return",
+                    },
                 )
             returns[timestamp] = value
         return returns
@@ -212,6 +272,11 @@ class CorrelationProtection:
             raise CorrelationDataError(
                 "correlation_history_insufficient",
                 "Aligned correlation history is insufficient",
+                context={
+                    "required_samples": self.config.min_samples,
+                    "observed_samples": len(timestamps),
+                    "data_issue": "misaligned_history",
+                },
             )
         first_values = [first[timestamp] for timestamp in timestamps]
         second_values = [second[timestamp] for timestamp in timestamps]
@@ -228,12 +293,22 @@ class CorrelationProtection:
             raise CorrelationDataError(
                 "correlation_data_invalid",
                 "Correlation variance is invalid",
+                context={
+                    "required_samples": self.config.min_samples,
+                    "observed_samples": len(timestamps),
+                    "data_issue": "invalid_variance",
+                },
             )
         correlation = covariance / denominator
         if not math.isfinite(correlation):
             raise CorrelationDataError(
                 "correlation_data_invalid",
                 "Correlation result is invalid",
+                context={
+                    "required_samples": self.config.min_samples,
+                    "observed_samples": len(timestamps),
+                    "data_issue": "invalid_correlation",
+                },
             )
         return max(-1.0, min(1.0, correlation))
 
