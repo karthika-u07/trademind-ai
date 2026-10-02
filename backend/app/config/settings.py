@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     maximum_position_risk: Decimal = Field(default=Decimal("100000.0"), gt=0)
     max_spread_points: float = Field(default=5.0, gt=0)
     max_slippage_points: float = Field(default=3.0, gt=0)
+    correlation_protection_enabled: bool = False
+    correlation_timeframe: Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"] = "H1"
+    correlation_lookback: int = Field(default=60, ge=2)
+    correlation_min_samples: int = Field(default=30, ge=2)
+    correlation_threshold: float = Field(default=0.80, ge=0, le=1)
+    max_correlated_positions: int = Field(
+        default=1,
+        gt=0,
+        description=(
+            "Maximum resulting correlated cluster size, including the "
+            "candidate order and distinct correlated open symbols"
+        ),
+    )
+    max_correlated_exposure: Decimal = Field(default=Decimal("100000.0"), gt=0)
+    correlation_max_data_age_seconds: float = Field(default=7200, gt=0)
     position_trailing_stop_enabled: bool = False
     position_trailing_trigger_atr_multiplier: Decimal = Field(
         default=Decimal("1.5"),
@@ -116,6 +131,10 @@ class Settings(BaseSettings):
             raise ValueError("indicator_macd_slow must be greater than indicator_macd_fast")
         if self.news_block_before_minutes == 0 and self.news_block_after_minutes == 0:
             raise ValueError("At least one news blocking window must be greater than zero")
+        if self.correlation_min_samples > self.correlation_lookback:
+            raise ValueError(
+                "correlation_min_samples cannot exceed correlation_lookback"
+            )
         return self
 
     @property

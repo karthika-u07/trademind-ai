@@ -16,10 +16,15 @@ except ModuleNotFoundError as error:
     mt5 = None
 
 from backend.app.config.settings import settings
+from backend.app.correlation.service import (
+    CorrelationConfig,
+    CorrelationDataError,
+    CorrelationPosition,
+    CorrelationProtection,
+)
 from backend.app.execution.news_guard import NewsEvent, NewsGuard
 from backend.app.execution.safety import ExecutionGate
 from backend.app.news.rules import extract_symbol_currencies
-
 
 logger = logging.getLogger(__name__)
 
@@ -827,6 +832,7 @@ class MT5Executor:
 
         current_symbol_exposure = Decimal("0")
         current_total_exposure = Decimal("0")
+        correlation_positions: list[CorrelationPosition] = []
         target_symbol = str(request.get("symbol", "")).strip().upper()
 
         try:
@@ -890,6 +896,12 @@ class MT5Executor:
                 current_total_exposure += exposure
                 if position_symbol == target_symbol:
                     current_symbol_exposure += exposure
+                correlation_positions.append(
+                    CorrelationPosition(
+                        symbol=position_symbol,
+                        exposure=exposure,
+                    )
+                )
         except (InvalidOperation, TypeError, ValueError):
             return {
                 "success": False,
@@ -1065,7 +1077,127 @@ class MT5Executor:
                 "comment": "Maximum total exposure limit reached",
             }
 
+        correlation_rejection = self._correlation_rejection(
+            target_symbol=target_symbol,
+            proposed_exposure=proposed_exposure,
+            positions=correlation_positions,
+        )
+        if correlation_rejection is not None:
+            return correlation_rejection
+
         return None
+
+    def _correlation_rejection(
+        self,
+        *,
+        target_symbol: str,
+        proposed_exposure: Decimal,
+        positions: list[CorrelationPosition],
+    ) -> dict | None:
+        if settings.correlation_protection_enabled is not True:
+            return None
+
+        timeframe_attribute = f"TIMEFRAME_{settings.correlation_timeframe}"
+        timeframe = getattr(mt5, timeframe_attribute, None)
+        if timeframe is None:
+            reason = "correlation_data_unavailable"
+            logger.warning(
+                "Market order rejected reason=%s detail=unsupported_timeframe "
+                "timeframe=%s",
+                reason,
+                settings.correlation_timeframe,
+            )
+            return self._correlation_rejection_result(
+                reason=reason,
+                comment="Correlation timeframe is unavailable",
+            )
+
+        protection = CorrelationProtection(
+            CorrelationConfig(
+                lookback=settings.correlation_lookback,
+                min_samples=settings.correlation_min_samples,
+                threshold=settings.correlation_threshold,
+                max_correlated_positions=settings.max_correlated_positions,
+                max_correlated_exposure=Decimal(
+                    str(settings.max_correlated_exposure)
+                ),
+                max_data_age_seconds=settings.correlation_max_data_age_seconds,
+            )
+        )
+
+        def load_candles(symbol: str, count: int):
+            try:
+                return mt5.copy_rates_from_pos(
+                    symbol,
+                    timeframe,
+                    0,
+                    count,
+                )
+            except Exception as error:
+                raise CorrelationDataError(
+                    "correlation_data_unavailable",
+                    f"Correlation candles are unavailable for {symbol}: {error}",
+                ) from error
+
+        try:
+            decision = protection.evaluate(
+                candidate_symbol=target_symbol,
+                candidate_exposure=proposed_exposure,
+                positions=positions,
+                candle_loader=load_candles,
+            )
+        except CorrelationDataError as error:
+            logger.warning(
+                "Market order rejected reason=%s detail=%s",
+                error.reason,
+                error.detail,
+            )
+            return self._correlation_rejection_result(
+                reason=error.reason,
+                comment=error.detail,
+            )
+
+        if decision.allowed:
+            return None
+
+        logger.warning(
+            "Market order rejected reason=%s correlated_symbols=%s "
+            "correlated_positions=%s correlated_exposure=%s correlations=%s",
+            decision.reason,
+            decision.correlated_symbols,
+            decision.correlated_positions,
+            decision.correlated_exposure,
+            decision.correlations,
+        )
+        return self._correlation_rejection_result(
+            reason=str(decision.reason),
+            comment="Correlation risk limit reached",
+            correlated_symbols=list(decision.correlated_symbols),
+            correlated_positions=decision.correlated_positions,
+            correlated_exposure=str(decision.correlated_exposure),
+            correlations={
+                symbol: correlation
+                for symbol, correlation in decision.correlations
+            },
+        )
+
+    def _correlation_rejection_result(
+        self,
+        *,
+        reason: str,
+        comment: str,
+        **details,
+    ) -> dict:
+        return {
+            "success": False,
+            "trading_allowed": False,
+            "blocked": True,
+            "sent": False,
+            "dry_run": self.dry_run,
+            "reason": reason,
+            "comment": comment,
+            **details,
+        }
 
     def send_order(self, request: dict) -> dict:
         """
