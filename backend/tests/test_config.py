@@ -22,6 +22,14 @@ def test_configuration_defaults_are_safe() -> None:
     assert settings.max_symbol_exposure == Decimal("100000.0")
     assert settings.max_total_exposure == Decimal("200000.0")
     assert settings.maximum_position_risk == Decimal("100000.0")
+    assert settings.correlation_protection_enabled is False
+    assert settings.correlation_timeframe == "H1"
+    assert settings.correlation_lookback == 60
+    assert settings.correlation_min_samples == 30
+    assert settings.correlation_threshold == 0.80
+    assert settings.max_correlated_positions == 1
+    assert settings.max_correlated_exposure == Decimal("100000.0")
+    assert settings.correlation_max_data_age_seconds == 7200
     assert settings.news_calendar_refresh_seconds == 30
     assert settings.news_block_before_minutes == 10
     assert settings.news_block_after_minutes == 10
@@ -58,6 +66,18 @@ def test_invalid_risk_values_are_rejected() -> None:
 
     with pytest.raises(ValidationError):
         Settings(maximum_position_risk=0)
+
+    with pytest.raises(ValidationError):
+        Settings(correlation_threshold=1.1)
+
+    with pytest.raises(ValidationError):
+        Settings(correlation_lookback=10, correlation_min_samples=11)
+
+    with pytest.raises(ValidationError):
+        Settings(max_correlated_positions=0)
+
+    with pytest.raises(ValidationError):
+        Settings(max_correlated_exposure=0)
 
 
 def test_position_management_defaults_are_safe() -> None:
@@ -99,3 +119,25 @@ def test_position_management_settings_are_loaded_from_environment(
 
     assert settings.position_trailing_stop_enabled is True
     assert settings.position_break_even_offset_points == Decimal("12.5")
+
+
+def test_correlation_settings_are_loaded_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CORRELATION_PROTECTION_ENABLED", "true")
+    monkeypatch.setenv("CORRELATION_TIMEFRAME", "M15")
+    monkeypatch.setenv("CORRELATION_LOOKBACK", "40")
+    monkeypatch.setenv("CORRELATION_MIN_SAMPLES", "20")
+    monkeypatch.setenv("CORRELATION_THRESHOLD", "0.75")
+    monkeypatch.setenv("MAX_CORRELATED_POSITIONS", "2")
+    monkeypatch.setenv("MAX_CORRELATED_EXPOSURE", "75000")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.correlation_protection_enabled is True
+    assert settings.correlation_timeframe == "M15"
+    assert settings.correlation_lookback == 40
+    assert settings.correlation_min_samples == 20
+    assert settings.correlation_threshold == 0.75
+    assert settings.max_correlated_positions == 2
+    assert settings.max_correlated_exposure == Decimal(75000)
