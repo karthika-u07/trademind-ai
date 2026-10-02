@@ -75,6 +75,47 @@ def test_persisted_kill_switch_reaches_risk_state(
     assert state.kill_switch_enabled is enabled
 
 
+def test_unavailable_broker_positions_abort_risk_state(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = engine_with_state(tmp_path)
+    monkeypatch.setattr(
+        engine_module,
+        "mt5",
+        SimpleNamespace(
+            positions_get=lambda: None,
+            last_error=lambda: (1, "positions unavailable"),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="positions_get failed"):
+        engine._risk_state(account())
+
+
+def test_missing_open_position_metadata_aborts_risk_state(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = engine_with_state(tmp_path)
+    position = SimpleNamespace(
+        symbol="GBPUSD",
+        volume=0.1,
+        price_current=1.25,
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "mt5",
+        SimpleNamespace(
+            positions_get=lambda: (position,),
+            symbol_info=lambda symbol: None,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="symbol metadata"):
+        engine._risk_state(account())
+
+
 def test_day_start_equity_update_preserves_kill_switch(tmp_path) -> None:
     engine = engine_with_state(tmp_path)
     engine.state_file.write_text(

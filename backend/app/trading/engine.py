@@ -264,7 +264,9 @@ class TradingEngine:
         positions = mt5.positions_get()
 
         if positions is None:
-            positions = []
+            raise RuntimeError(
+                f"MT5 positions_get failed: {mt5.last_error()}"
+            )
 
         current_symbol_exposure = Decimal("0")
         current_total_exposure = Decimal("0")
@@ -276,11 +278,25 @@ class TradingEngine:
 
             info = mt5.symbol_info(symbol)
             if info is None:
-                continue
+                raise RuntimeError(
+                    f"Unable to retrieve symbol metadata for '{symbol}'"
+                )
 
-            contract_size = Decimal(
-                str(info.trade_contract_size)
-            )
+            try:
+                contract_size = Decimal(str(info.trade_contract_size))
+                if (
+                    not volume.is_finite()
+                    or volume < 0
+                    or not price.is_finite()
+                    or price <= 0
+                    or not contract_size.is_finite()
+                    or contract_size <= 0
+                ):
+                    raise ValueError("invalid exposure metadata")
+            except (InvalidOperation, TypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"Invalid exposure metadata for '{symbol}'"
+                ) from error
 
             exposure = abs(
                 price * volume * contract_size
@@ -544,9 +560,17 @@ class TradingEngine:
             request
         )
 
-        if execution_result.get("blocked"):
+        if execution_result.get("reason") == "high_impact_news":
             return {
                 "status": "NEWS_BLOCKED",
+                "symbol": self.symbol,
+                "signal": strategy_result.signal.value,
+                "execution": execution_result,
+            }
+
+        if not execution_result.get("success"):
+            return {
+                "status": "EXECUTION_REJECTED",
                 "symbol": self.symbol,
                 "signal": strategy_result.signal.value,
                 "execution": execution_result,

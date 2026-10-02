@@ -83,10 +83,16 @@ def test_news_guard_ignores_low_impact_and_unrelated_currencies() -> None:
     assert event is None
 
 
-def write_calendar(path: Path, *, title: str = "CPI") -> None:
+def write_calendar(
+    path: Path,
+    *,
+    title: str = "CPI",
+    event_time: datetime = EVENT_TIME,
+) -> None:
     path.write_text(
         CSV_HEADER
-        + f"event-1,{title},USD,high,2026.09.19 12:00:00,,,\n",
+        + f"event-1,{title},USD,high,"
+        + f"{event_time.strftime('%Y.%m.%d %H:%M:%S')},,,\n",
         encoding="utf-8",
     )
 
@@ -176,6 +182,143 @@ def test_calendar_refresh_preserves_events_on_file_failure(
         advance_mtime(calendar)
 
     assert executor.refresh_calendar_events(force=True) is False
+    assert executor.news_guard.events == original_events
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        None,
+        CSV_HEADER,
+        "wrong,headers\ninvalid,row\n",
+    ],
+)
+def test_unverified_calendar_rejects_before_market_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contents: str | None,
+) -> None:
+    calendar = tmp_path / "calendar.csv"
+    if contents is not None:
+        calendar.write_text(contents, encoding="utf-8")
+    executor = MT5Executor(calendar_file=calendar)
+    executor.connected = True
+
+    def fail_send(request):
+        pytest.fail(f"order_send was called with {request}")
+
+    monkeypatch.setattr(
+        mt5_executor,
+        "mt5",
+        SimpleNamespace(order_send=fail_send),
+    )
+
+    result = executor.execute_order({"symbol": "EURUSD"})
+
+    assert result["success"] is False
+    assert result["sent"] is False
+    assert result["reason"] == "news_calendar_unavailable"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        None,
+        CSV_HEADER,
+        "wrong,headers\ninvalid,row\n",
+    ],
+)
+def test_direct_live_send_rejects_unverified_calendar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contents: str | None,
+) -> None:
+    calendar = tmp_path / "calendar.csv"
+    if contents is not None:
+        calendar.write_text(contents, encoding="utf-8")
+    executor = MT5Executor(dry_run=False, calendar_file=calendar)
+    executor.connected = True
+    monkeypatch.setattr(mt5_executor.settings, "trading_mode", "live")
+    monkeypatch.setattr(mt5_executor.settings, "live_trading_enabled", True)
+
+    def fail_send(request):
+        pytest.fail(f"order_send was called with {request}")
+
+    monkeypatch.setattr(
+        mt5_executor,
+        "mt5",
+        SimpleNamespace(order_send=fail_send),
+    )
+
+    result = executor.send_order(
+        {"symbol": "EURUSD", "volume": 0.1, "price": 1.1}
+    )
+
+    assert result["sent"] is False
+    assert result["reason"] == "news_calendar_unavailable"
+
+
+def test_direct_live_send_blocks_current_high_impact_news(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calendar = tmp_path / "calendar.csv"
+    write_calendar(calendar, event_time=datetime.now(timezone.utc))
+    executor = MT5Executor(dry_run=False, calendar_file=calendar)
+    executor.connected = True
+    monkeypatch.setattr(mt5_executor.settings, "trading_mode", "live")
+    monkeypatch.setattr(mt5_executor.settings, "live_trading_enabled", True)
+
+    def fail_send(request):
+        pytest.fail(f"order_send was called with {request}")
+
+    monkeypatch.setattr(
+        mt5_executor,
+        "mt5",
+        SimpleNamespace(order_send=fail_send),
+    )
+
+    assert executor._calendar_verified is True
+    assert executor._calendar_refresh_healthy is True
+
+    result = executor.send_order(
+        {"symbol": "EURUSD", "volume": 0.1, "price": 1.1}
+    )
+
+    assert result["success"] is False
+    assert result["trading_allowed"] is False
+    assert result["blocked"] is True
+    assert result["sent"] is False
+    assert result["dry_run"] is False
+    assert result["reason"] == "high_impact_news"
+    assert result["event"] == "CPI"
+    assert result["currency"] == "USD"
+
+
+def test_failed_calendar_refresh_rejects_and_preserves_last_valid_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calendar = tmp_path / "calendar.csv"
+    write_calendar(calendar)
+    executor = MT5Executor(calendar_file=calendar)
+    executor.connected = True
+    original_events = list(executor.news_guard.events)
+    calendar.unlink()
+    executor._last_calendar_check = 0.0
+
+    def fail_send(request):
+        pytest.fail(f"order_send was called with {request}")
+
+    monkeypatch.setattr(
+        mt5_executor,
+        "mt5",
+        SimpleNamespace(order_send=fail_send),
+    )
+
+    result = executor.execute_order({"symbol": "EURUSD"})
+
+    assert result["reason"] == "news_calendar_unavailable"
     assert executor.news_guard.events == original_events
 
 
