@@ -57,6 +57,7 @@ class PositionManagementDecision(BaseModel):
 
     allowed: bool
     action: PositionManagementAction
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ticket: int = Field(gt=0)
     symbol: str = Field(min_length=1)
     current_stop_loss: Decimal | None = Field(default=None, ge=0)
@@ -72,6 +73,13 @@ class PositionManagementDecision(BaseModel):
         if not symbol:
             raise ValueError("symbol must not be blank")
         return symbol
+
+    @field_validator("timestamp")
+    @classmethod
+    def normalize_decision_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     @field_validator("reason_codes")
     @classmethod

@@ -268,8 +268,8 @@ class TradingEngine:
                 f"MT5 positions_get failed: {mt5.last_error()}"
             )
 
-        current_symbol_exposure = Decimal("0")
-        current_total_exposure = Decimal("0")
+        current_symbol_exposure = Decimal(0)
+        current_total_exposure = Decimal(0)
 
         for position in positions:
             symbol = str(position.symbol)
@@ -557,7 +557,8 @@ class TradingEngine:
             }
 
         execution_result = self.executor.execute_order(
-            request
+            request,
+            risk_decision=risk_decision,
         )
 
         if execution_result.get("reason") == "high_impact_news":

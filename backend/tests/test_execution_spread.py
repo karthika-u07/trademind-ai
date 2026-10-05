@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -11,14 +12,61 @@ pytest.importorskip("MetaTrader5")
 from backend.app.execution import mt5_executor
 from backend.app.execution.mt5_executor import MT5Executor
 from backend.app.execution.news_guard import NewsGuard
+from backend.app.risk.models import RiskDecision, Side
+
+
+def allowed_risk_decision(request: dict) -> RiskDecision:
+    volume = Decimal(str(request["volume"]))
+    return RiskDecision(
+        allowed=True,
+        reason_codes=["RISK_ALLOWED"],
+        risk_amount=Decimal(1000),
+        risk_per_trade=Decimal("0.01"),
+        entry_price=Decimal("1.1"),
+        stop_loss=Decimal("1.09"),
+        take_profit=Decimal("1.12"),
+        stop_distance=Decimal("0.01"),
+        reward_risk_ratio=Decimal(2),
+        raw_volume=volume,
+        normalized_volume=volume,
+        planned_loss=Decimal(100),
+        planned_reward=Decimal(200),
+        daily_drawdown=Decimal(0),
+        daily_profit=Decimal(0),
+        open_positions=0,
+        symbol="EURUSD",
+        side=Side.BUY,
+        timestamp=datetime.now(timezone.utc),
+    )
 
 
 def executor() -> MT5Executor:
     instance = object.__new__(MT5Executor)
     instance.connected = True
     instance.dry_run = True
-    instance.max_spread_points = Decimal("5")
+    instance.max_spread_points = Decimal(5)
     instance.max_slippage_points = Decimal("3.9")
+    send_order = instance.send_order
+
+    def authorized_send(request: dict, *, risk_decision=None):
+        complete_request = {
+            "action": mt5_executor.TRADE_ACTION_DEAL,
+            "symbol": "EURUSD",
+            "volume": 0.1,
+            "type": mt5_executor.ORDER_TYPE_BUY,
+            "price": 1.1,
+            "sl": 1.09,
+            "tp": 1.12,
+            **request,
+        }
+        return send_order(
+            complete_request,
+            risk_decision=(
+                risk_decision or allowed_risk_decision(complete_request)
+            ),
+        )
+
+    instance.send_order = authorized_send
     return instance
 
 
@@ -401,7 +449,7 @@ def test_fresh_position_snapshot_enforces_total_exposure_limit(
     instance = executor()
     instance.dry_run = False
     allow_live(instance, monkeypatch)
-    monkeypatch.setattr(mt5_executor.settings, "max_total_exposure", Decimal("10000"))
+    monkeypatch.setattr(mt5_executor.settings, "max_total_exposure", Decimal(10000))
     position = SimpleNamespace(symbol="GBPUSD", volume=0.1, price_current=1.25)
 
     def fail_send(request):
@@ -432,7 +480,7 @@ def test_fresh_position_snapshot_enforces_symbol_exposure_limit(
     instance = executor()
     instance.dry_run = False
     allow_live(instance, monkeypatch)
-    monkeypatch.setattr(mt5_executor.settings, "max_symbol_exposure", Decimal("20000"))
+    monkeypatch.setattr(mt5_executor.settings, "max_symbol_exposure", Decimal(20000))
     position = SimpleNamespace(symbol="EURUSD", volume=0.1, price_current=1.1)
 
     def fail_send(request):
