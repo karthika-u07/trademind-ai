@@ -1,6 +1,6 @@
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-import logging
 from types import SimpleNamespace
 
 import pytest
@@ -90,17 +90,22 @@ class FakeEngine:
 def trailing_service() -> PositionManagementService:
     return PositionManagementService(
         trailing_stop_enabled=True,
-        trailing_trigger_atr_multiplier=Decimal("1"),
-        trailing_distance_atr_multiplier=Decimal("1"),
+        trailing_trigger_atr_multiplier=Decimal(1),
+        trailing_distance_atr_multiplier=Decimal(1),
     )
 
 
 class CapturingService(PositionManagementService):
-    positions = []
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.positions = []
+        self.decisions = []
 
     def evaluate_stops(self, position, **kwargs):
         self.positions.append(position)
-        return super().evaluate_stops(position, **kwargs)
+        decision = super().evaluate_stops(position, **kwargs)
+        self.decisions.append(decision)
+        return decision
 
 
 def test_runner_position_observation_is_read_only_when_disabled() -> None:
@@ -194,7 +199,7 @@ def test_runner_populates_snapshot_context() -> None:
     engine = FakeEngine([raw_position()], {"EURUSD": context()})
     service = CapturingService(
         trailing_stop_enabled=True,
-        trailing_trigger_atr_multiplier=Decimal("1"),
+        trailing_trigger_atr_multiplier=Decimal(1),
     )
     service.positions = []
 
@@ -246,7 +251,7 @@ def test_context_failure_for_one_symbol_does_not_block_another() -> None:
     assert [item["ticket"] for item in engine.executor.modifications] == [2]
 
 
-@pytest.mark.parametrize("atr", [None, Decimal("0"), Decimal("-0.001")])
+@pytest.mark.parametrize("atr", [None, Decimal(0), Decimal("-0.001")])
 def test_missing_or_invalid_atr_does_not_modify_stop(
     atr: Decimal | None,
 ) -> None:
@@ -269,17 +274,22 @@ def test_no_action_decision_does_not_modify_stop() -> None:
 
 def test_modify_stops_receives_exact_decision_and_preserves_take_profit() -> None:
     engine = FakeEngine([raw_position()], {"EURUSD": context()})
+    service = CapturingService(
+        trailing_stop_enabled=True,
+        trailing_trigger_atr_multiplier=Decimal(1),
+    )
+    service.positions = []
+    service.decisions = []
 
-    _observe_open_positions(engine, trailing_service())
+    _observe_open_positions(engine, service)
 
-    assert engine.executor.modifications == [
-        {
-            "ticket": 12345,
-            "symbol": "EURUSD",
-            "stop_loss": Decimal("1.1040"),
-            "take_profit": None,
-        }
-    ]
+    assert len(engine.executor.modifications) == 1
+    modification = engine.executor.modifications[0]
+    assert modification["ticket"] == 12345
+    assert modification["symbol"] == "EURUSD"
+    assert modification["stop_loss"] == Decimal("1.1040")
+    assert modification["take_profit"] is None
+    assert modification["decision"] is service.decisions[0]
 
 
 def test_dry_run_modification_result_remains_unsent(caplog) -> None:

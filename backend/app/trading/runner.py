@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
-from pathlib import Path
 import subprocess
 import time
+from decimal import Decimal
+from pathlib import Path
 
 from backend.app.config.settings import settings
 from backend.app.notifications.news_monitor import NewsMonitor
@@ -88,6 +88,7 @@ def _observe_open_positions(
                     symbol=position.symbol,
                     stop_loss=decision.desired_stop_loss,
                     take_profit=None,
+                    decision=decision,
                 )
             except Exception:
                 logger.exception(

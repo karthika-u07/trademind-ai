@@ -20,6 +20,7 @@ from backend.app.correlation.service import (
 from backend.app.execution import mt5_executor
 from backend.app.execution.mt5_executor import MT5Executor
 from backend.app.execution.news_guard import NewsGuard
+from backend.app.risk.models import RiskDecision, Side
 from backend.app.strategy.models import StrategySignal
 from backend.app.trading import engine as trading_engine
 from backend.app.trading.engine import TradingEngine
@@ -153,15 +154,57 @@ def install_market(
                 ask=1.1002,
                 time_msc=int(time.time() * 1000),
             ),
+            order_calc_profit=(
+                lambda order_type, symbol, volume, opened, closed: (
+                    -abs(opened - closed) / 0.0001 * 10.0 * volume
+                )
+            ),
             copy_rates_from_pos=copy_rates,
             order_send=order_send,
         ),
     )
 
 
+def allowed_risk_decision() -> RiskDecision:
+    return RiskDecision(
+        allowed=True,
+        reason_codes=["RISK_ALLOWED"],
+        risk_amount=Decimal(1000),
+        risk_per_trade=Decimal("0.01"),
+        entry_price=Decimal("1.1002"),
+        stop_loss=Decimal("1.09"),
+        take_profit=Decimal("1.12"),
+        stop_distance=Decimal("0.0102"),
+        reward_risk_ratio=Decimal(2),
+        raw_volume=Decimal("0.1"),
+        normalized_volume=Decimal("0.1"),
+        planned_loss=Decimal(102),
+        planned_reward=Decimal(198),
+        daily_drawdown=Decimal(0),
+        daily_profit=Decimal(0),
+        open_positions=1,
+        symbol="EURUSD",
+        side=Side.BUY,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+
+def market_order_request() -> dict:
+    return {
+        "action": mt5_executor.TRADE_ACTION_DEAL,
+        "symbol": "EURUSD",
+        "volume": 0.1,
+        "type": mt5_executor.ORDER_TYPE_BUY,
+        "price": 1.1002,
+        "sl": 1.09,
+        "tp": 1.12,
+    }
+
+
 def send(instance: MT5Executor) -> dict:
     return instance.send_order(
-        {"symbol": "EURUSD", "volume": 0.1, "price": 1.1002}
+        market_order_request(),
+        risk_decision=allowed_risk_decision(),
     )
 
 
@@ -535,7 +578,8 @@ def test_correlation_rejection_details_survive_execute_order(
     )
 
     result = executor().execute_order(
-        {"symbol": "EURUSD", "volume": 0.1, "price": 1.1002}
+        market_order_request(),
+        risk_decision=allowed_risk_decision(),
     )
 
     assert result["reason"] == "correlated_position_limit_reached"
@@ -546,8 +590,10 @@ def test_correlation_rejection_details_survive_execute_order(
     assert result["correlations"]["GBPUSD"] == pytest.approx(1.0)
 
 
-def test_correlation_rejection_details_survive_trading_engine(
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_risk_decision_and_correlation_details_survive_trading_engine(
     monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
 ) -> None:
     candle_time = datetime.now(timezone.utc)
     strategy_result = SimpleNamespace(
@@ -558,13 +604,8 @@ def test_correlation_rejection_details_survive_trading_engine(
         reason_codes=[],
     )
     regime = SimpleNamespace(regime="TRENDING_BULLISH")
-    risk_decision = SimpleNamespace(
-        allowed=True,
-        reason_codes=["RISK_ALLOWED"],
-        normalized_volume=Decimal("0.1"),
-        stop_loss=Decimal("1.09"),
-        take_profit=Decimal("1.12"),
-    )
+    risk_decision = allowed_risk_decision()
+    forwarded_decisions = []
     rejection = {
         "success": False,
         "trading_allowed": False,
@@ -585,7 +626,7 @@ def test_correlation_rejection_details_survive_trading_engine(
     instance._connected = True
     instance._last_processed_candle = None
     instance.symbol = "EURUSD"
-    instance.dry_run = False
+    instance.dry_run = dry_run
     instance._run_analysis = lambda: (
         [{"timestamp": candle_time, "high": 1.11, "low": 1.10}],
         None,
@@ -603,10 +644,14 @@ def test_correlation_rejection_details_survive_trading_engine(
     instance._symbol_metadata = lambda: object()
     instance._risk_state = lambda account: object()
     instance.risk = SimpleNamespace(evaluate_trade=lambda **kwargs: risk_decision)
+    def execute_order(request, *, risk_decision=None):
+        forwarded_decisions.append(risk_decision)
+        return rejection
+
     instance.executor = SimpleNamespace(
         prepare_market_order=lambda **kwargs: {"symbol": kwargs["symbol"]},
         check_order=lambda request: {"retcode": 0},
-        execute_order=lambda request: rejection,
+        execute_order=execute_order,
     )
     monkeypatch.setattr(
         trading_engine,
@@ -626,6 +671,8 @@ def test_correlation_rejection_details_survive_trading_engine(
     result = instance.run_once()
 
     assert result["status"] == "EXECUTION_REJECTED"
+    assert forwarded_decisions == [risk_decision]
+    assert forwarded_decisions[0] is risk_decision
     assert result["execution"] is rejection
     assert result["execution"]["reason"] == "correlated_position_limit_reached"
     assert result["execution"]["correlations"] == {"GBPUSD": 1.0}

@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from threading import Lock
-from typing import Optional
 
 try:
     import MetaTrader5 as mt5
@@ -25,6 +24,11 @@ from backend.app.correlation.service import (
 from backend.app.execution.news_guard import NewsEvent, NewsGuard
 from backend.app.execution.safety import ExecutionGate
 from backend.app.news.rules import extract_symbol_currencies
+from backend.app.position_management.models import (
+    PositionManagementAction,
+    PositionManagementDecision,
+)
+from backend.app.risk.models import RiskDecision, Side
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,13 @@ REQUIRED_CALENDAR_COLUMNS = {
 }
 MAX_TICK_AGE_SECONDS = 5.0
 MAX_BROKER_CLOCK_OFFSET_HOURS = 14
+MAX_RISK_DECISION_AGE_SECONDS = 30.0
+MAX_POSITION_DECISION_AGE_SECONDS = 30.0
+TRADE_ACTION_DEAL = mt5.TRADE_ACTION_DEAL if mt5 is not None else 1
+ORDER_TYPE_BUY = mt5.ORDER_TYPE_BUY if mt5 is not None else 0
+ORDER_TYPE_SELL = mt5.ORDER_TYPE_SELL if mt5 is not None else 1
+POSITION_TYPE_BUY = mt5.POSITION_TYPE_BUY if mt5 is not None else 0
+POSITION_TYPE_SELL = mt5.POSITION_TYPE_SELL if mt5 is not None else 1
 
 
 class MT5Executor:
@@ -156,7 +167,7 @@ class MT5Executor:
             if invalid_rows and not events:
                 raise ValueError("Calendar CSV contains no valid event rows")
 
-        except Exception as error:
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
             if raise_on_error:
                 raise
 
@@ -349,6 +360,8 @@ class MT5Executor:
         symbol: str,
         stop_loss: float | None = None,
         take_profit: float | None = None,
+        *,
+        decision: PositionManagementDecision | None = None,
     ) -> dict:
         """Modify an open position's SL/TP without executing a market order."""
 
@@ -362,10 +375,10 @@ class MT5Executor:
             raise ValueError("symbol must not be blank")
         if stop_loss is None and take_profit is None:
             raise ValueError("stop_loss or take_profit must be supplied")
-        if stop_loss is not None and stop_loss < 0:
-            raise ValueError("stop_loss must not be negative")
-        if take_profit is not None and take_profit < 0:
-            raise ValueError("take_profit must not be negative")
+        if stop_loss is not None and stop_loss <= 0:
+            raise ValueError("stop_loss must be positive")
+        if take_profit is not None and take_profit <= 0:
+            raise ValueError("take_profit must be positive")
 
         base_result = {
             "ticket": ticket,
@@ -400,6 +413,16 @@ class MT5Executor:
                 ),
             }
 
+        authorization_rejection = self._position_authorization_rejection(
+            ticket=ticket,
+            symbol=normalized_symbol,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            decision=decision,
+        )
+        if authorization_rejection is not None:
+            return {**base_result, **authorization_rejection}
+
         positions = mt5.positions_get(ticket=ticket)
         if positions is None:
             raise RuntimeError(
@@ -409,11 +432,16 @@ class MT5Executor:
             raise ValueError(f"Open position {ticket} was not found")
 
         position = positions[0]
-        if str(position.symbol).upper() != normalized_symbol:
-            raise ValueError(
-                f"Position {ticket} belongs to '{position.symbol}', "
-                f"not '{normalized_symbol}'"
-            )
+        authorization_rejection = self._position_authorization_rejection(
+            ticket=ticket,
+            symbol=normalized_symbol,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            decision=decision,
+            position=position,
+        )
+        if authorization_rejection is not None:
+            return {**base_result, **authorization_rejection}
 
         effective_stop_loss = position.sl if stop_loss is None else stop_loss
         effective_take_profit = position.tp if take_profit is None else take_profit
@@ -461,6 +489,163 @@ class MT5Executor:
             "comment": result_dict.get("comment"),
         }
 
+    def _position_authorization_rejection(
+        self,
+        *,
+        ticket: int,
+        symbol: str,
+        stop_loss: float | None,
+        take_profit: float | None,
+        decision: PositionManagementDecision | None,
+        position=None,
+    ) -> dict | None:
+        def reject(reason: str, comment: str) -> dict:
+            logger.warning(
+                "Position modification rejected reason=%s ticket=%s symbol=%s",
+                reason,
+                ticket,
+                symbol,
+            )
+            return {
+                "success": False,
+                "sent": False,
+                "dry_run": False,
+                "retcode": None,
+                "reason": reason,
+                "comment": comment,
+            }
+
+        if decision is None:
+            return reject(
+                "position_authorization_missing",
+                "Live position modification requires an approved decision",
+            )
+        if not isinstance(decision, PositionManagementDecision):
+            return reject(
+                "position_authorization_malformed",
+                "Position-management authorization is malformed",
+            )
+        if (
+            decision.allowed is not True
+            or decision.action is not PositionManagementAction.MODIFY_STOPS
+        ):
+            return reject(
+                "position_authorization_denied",
+                "Position-management decision did not authorize modification",
+            )
+
+        age_seconds = (datetime.now(timezone.utc) - decision.timestamp).total_seconds()
+        if not math.isfinite(age_seconds) or age_seconds < -MAX_TICK_AGE_SECONDS:
+            return reject(
+                "position_authorization_malformed",
+                "Position-management authorization timestamp is invalid",
+            )
+        if age_seconds > MAX_POSITION_DECISION_AGE_SECONDS:
+            return reject(
+                "position_authorization_stale",
+                "Position-management authorization is stale",
+            )
+
+        try:
+            requested_stop = (
+                Decimal(str(stop_loss)) if stop_loss is not None else None
+            )
+            requested_take_profit = (
+                Decimal(str(take_profit)) if take_profit is not None else None
+            )
+            requested_values = (requested_stop, requested_take_profit)
+            if any(
+                value is not None and (not value.is_finite() or value <= 0)
+                for value in requested_values
+            ):
+                raise ValueError("invalid requested stop value")
+        except (InvalidOperation, TypeError, ValueError):
+            return reject(
+                "position_authorization_malformed",
+                "Requested position stops are invalid",
+            )
+
+        if (
+            decision.ticket != ticket
+            or decision.symbol != symbol
+            or decision.desired_stop_loss != requested_stop
+            or decision.desired_take_profit != requested_take_profit
+        ):
+            return reject(
+                "position_authorization_mismatch",
+                "Requested position stops do not match authorization",
+            )
+
+        if position is None:
+            return None
+
+        try:
+            actual_ticket = int(position.ticket)
+            actual_symbol = str(position.symbol).strip().upper()
+            position_type = position.type
+            current_price = Decimal(str(position.price_current))
+            current_stop = Decimal(str(position.sl)) if position.sl else None
+            current_take_profit = Decimal(str(position.tp)) if position.tp else None
+            actual_values = (current_price, current_stop, current_take_profit)
+            if (
+                isinstance(position_type, bool)
+                or position_type not in {POSITION_TYPE_BUY, POSITION_TYPE_SELL}
+                or not current_price.is_finite()
+                or current_price <= 0
+                or any(
+                    value is not None and (not value.is_finite() or value <= 0)
+                    for value in actual_values[1:]
+                )
+            ):
+                raise ValueError("invalid position data")
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return reject(
+                "position_authorization_data_invalid",
+                "Current position data is invalid for authorization",
+            )
+
+        if (
+            actual_ticket != ticket
+            or actual_symbol != symbol
+            or decision.current_stop_loss != current_stop
+            or decision.current_take_profit != current_take_profit
+        ):
+            return reject(
+                "position_authorization_mismatch",
+                "Current position does not match authorization",
+            )
+
+        if requested_stop is not None:
+            if position_type == POSITION_TYPE_BUY:
+                direction_valid = (
+                    requested_stop < current_price
+                    and (current_stop is None or requested_stop > current_stop)
+                )
+            else:
+                direction_valid = (
+                    requested_stop > current_price
+                    and (current_stop is None or requested_stop < current_stop)
+                )
+            if not direction_valid:
+                return reject(
+                    "position_stop_direction_invalid",
+                    "Authorized stop would remove or widen protection",
+                )
+
+        if requested_take_profit is not None:
+            direction_valid = (
+                requested_take_profit > current_price
+                if position_type == POSITION_TYPE_BUY
+                else requested_take_profit < current_price
+            )
+            if not direction_valid:
+                return reject(
+                    "position_stop_direction_invalid",
+                    "Authorized take profit is invalid for the position side",
+                )
+
+        return None
+
     def get_filling_mode(self, symbol_info):
         """
         Select a supported MT5 order filling mode.
@@ -492,8 +677,8 @@ class MT5Executor:
         symbol: str,
         side: str,
         volume: float,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
     ) -> dict:
         """
         Prepare a market order request.
@@ -613,10 +798,18 @@ class MT5Executor:
 
         return result_dict
 
-    def execute_order(self, request: dict) -> dict:
+    def execute_order(
+        self,
+        request: dict,
+        *,
+        risk_decision: RiskDecision | None = None,
+    ) -> dict:
         """
         Check news conditions and execute the order only
         when trading is allowed.
+
+        Dry-run remains intentionally limited to news and market-safety checks;
+        it is not a complete preview of live risk authorization.
         """
 
         if not self.connected:
@@ -627,7 +820,7 @@ class MT5Executor:
             if news_rejection is not None:
                 return news_rejection
 
-        result = self.send_order(request)
+        result = self.send_order(request, risk_decision=risk_decision)
 
         if result.get("blocked"):
             return result
@@ -808,6 +1001,296 @@ class MT5Executor:
             "comment": "Market safety check rejected order",
         }
 
+    def _risk_authorization_rejection(
+        self,
+        request: dict,
+        risk_decision: RiskDecision | None,
+    ) -> dict | None:
+        def reject(reason: str, comment: str) -> dict:
+            logger.warning(
+                "Market order rejected reason=%s symbol=%s",
+                reason,
+                request.get("symbol"),
+            )
+            return {
+                "success": False,
+                "trading_allowed": False,
+                "blocked": True,
+                "sent": False,
+                "dry_run": False,
+                "reason": reason,
+                "comment": comment,
+            }
+
+        if risk_decision is None:
+            return reject(
+                "risk_authorization_missing",
+                "Live market order requires an approved risk decision",
+            )
+        if not isinstance(risk_decision, RiskDecision):
+            return reject(
+                "risk_authorization_malformed",
+                "Risk authorization is malformed",
+            )
+        if risk_decision.allowed is not True:
+            return reject(
+                "risk_authorization_denied",
+                "Risk decision did not authorize this order",
+            )
+
+        age_seconds = (datetime.now(timezone.utc) - risk_decision.timestamp).total_seconds()
+        if not math.isfinite(age_seconds) or age_seconds < -MAX_TICK_AGE_SECONDS:
+            return reject(
+                "risk_authorization_malformed",
+                "Risk authorization timestamp is invalid",
+            )
+        if age_seconds > MAX_RISK_DECISION_AGE_SECONDS:
+            return reject(
+                "risk_authorization_stale",
+                "Risk authorization is stale",
+            )
+
+        symbol = str(request.get("symbol", "")).strip().upper()
+        expected_symbol = risk_decision.symbol.strip().upper()
+        expected_order_type = (
+            ORDER_TYPE_BUY if risk_decision.side is Side.BUY else ORDER_TYPE_SELL
+        )
+        action = request.get("action")
+        order_type = request.get("type")
+        if (
+            not symbol
+            or symbol != expected_symbol
+            or isinstance(action, bool)
+            or action != TRADE_ACTION_DEAL
+            or isinstance(order_type, bool)
+            or order_type != expected_order_type
+        ):
+            return reject(
+                "risk_authorization_mismatch",
+                "Order identity does not match risk authorization",
+            )
+
+        try:
+            volume = Decimal(str(request.get("volume")))
+            stop_loss = Decimal(str(request.get("sl")))
+            take_profit = Decimal(str(request.get("tp")))
+            approved_values = (
+                risk_decision.normalized_volume,
+                risk_decision.stop_loss,
+                risk_decision.take_profit,
+                risk_decision.risk_amount,
+                risk_decision.planned_loss,
+            )
+            if (
+                any(not value.is_finite() or value <= 0 for value in approved_values)
+                or not volume.is_finite()
+                or volume <= 0
+                or not stop_loss.is_finite()
+                or stop_loss <= 0
+                or not take_profit.is_finite()
+                or take_profit <= 0
+            ):
+                raise ValueError("invalid authorization values")
+        except (InvalidOperation, TypeError, ValueError):
+            return reject(
+                "risk_authorization_malformed",
+                "Order risk values are invalid",
+            )
+
+        maximum_position_risk = Decimal(str(settings.maximum_position_risk))
+        if (
+            risk_decision.planned_loss > risk_decision.risk_amount
+            or risk_decision.planned_loss > maximum_position_risk
+        ):
+            return reject(
+                "risk_authorization_malformed",
+                "Approved planned loss exceeds risk limits",
+            )
+
+        if risk_decision.side is Side.BUY:
+            direction_valid = stop_loss < risk_decision.entry_price < take_profit
+        else:
+            direction_valid = take_profit < risk_decision.entry_price < stop_loss
+        if not direction_valid:
+            return reject(
+                "protective_stops_invalid",
+                "Protective SL/TP direction is invalid for the approved side",
+            )
+
+        return None
+
+    def _current_position_risk_rejection(
+        self,
+        request: dict,
+        risk_decision: RiskDecision,
+    ) -> dict | None:
+        symbol = str(request.get("symbol", "")).strip().upper()
+        try:
+            symbol_info = mt5.symbol_info(symbol)
+            tick = mt5.symbol_info_tick(symbol)
+        except (
+            AttributeError,
+            InvalidOperation,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            logger.warning(
+                "Final risk market data lookup failed symbol=%s error=%s",
+                symbol,
+                error,
+            )
+            return self._risk_rejection_result(
+                "risk_authorization_data_invalid",
+                "Current market data is unavailable for risk authorization",
+            )
+
+        if tick is None:
+            return self._risk_rejection_result(
+                "risk_authorization_data_invalid",
+                "Current tick data is unavailable for risk authorization",
+            )
+
+        try:
+            tick_timestamp = float(tick.time_msc) / 1000.0
+            raw_tick_age_seconds = time.time() - tick_timestamp
+            broker_clock_offset_hours = round(
+                raw_tick_age_seconds / (60 * 60)
+            )
+            tick_age_seconds = raw_tick_age_seconds - (
+                broker_clock_offset_hours * 60 * 60
+            )
+            if (
+                not math.isfinite(tick_timestamp)
+                or not math.isfinite(tick_age_seconds)
+                or tick_timestamp <= 0
+                or abs(broker_clock_offset_hours) > MAX_BROKER_CLOCK_OFFSET_HOURS
+            ):
+                raise ValueError("invalid final tick timestamp")
+        except (AttributeError, TypeError, ValueError):
+            return self._risk_rejection_result(
+                "risk_authorization_data_invalid",
+                "Current tick timestamp is invalid for risk authorization",
+            )
+
+        if (
+            tick_age_seconds < -MAX_TICK_AGE_SECONDS
+            or tick_age_seconds > MAX_TICK_AGE_SECONDS
+        ):
+            return self._risk_rejection_result(
+                "stale_tick_data",
+                "Current tick is stale at the final risk boundary",
+            )
+
+        try:
+            volume = Decimal(str(request.get("volume")))
+            stop_loss = Decimal(str(request.get("sl")))
+            take_profit = Decimal(str(request.get("tp")))
+            tick_size = Decimal(str(symbol_info.trade_tick_size))
+            volume_step = Decimal(str(symbol_info.volume_step))
+            executable_price = Decimal(
+                str(tick.ask if risk_decision.side is Side.BUY else tick.bid)
+            )
+            if (
+                not volume.is_finite()
+                or volume <= 0
+                or not stop_loss.is_finite()
+                or stop_loss <= 0
+                or not tick_size.is_finite()
+                or tick_size <= 0
+                or not volume_step.is_finite()
+                or volume_step <= 0
+                or not executable_price.is_finite()
+                or executable_price <= 0
+            ):
+                raise ValueError("invalid current risk metadata")
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return self._risk_rejection_result(
+                "risk_authorization_data_invalid",
+                "Current market data is invalid for risk authorization",
+            )
+
+        if (
+            abs(volume - risk_decision.normalized_volume) >= volume_step / 2
+            or abs(stop_loss - risk_decision.stop_loss) >= tick_size / 2
+            or abs(take_profit - risk_decision.take_profit) >= tick_size / 2
+        ):
+            return self._risk_rejection_result(
+                "risk_authorization_mismatch",
+                "Order risk values do not match risk authorization",
+            )
+
+        if risk_decision.side is Side.BUY:
+            direction_valid = stop_loss < executable_price < take_profit
+        else:
+            direction_valid = take_profit < executable_price < stop_loss
+        if not direction_valid:
+            return self._risk_rejection_result(
+                "protective_stops_invalid",
+                "Protective SL/TP direction is invalid at the current price",
+            )
+
+        try:
+            order_type = (
+                ORDER_TYPE_BUY
+                if risk_decision.side is Side.BUY
+                else ORDER_TYPE_SELL
+            )
+            calculated_profit = mt5.order_calc_profit(
+                order_type,
+                symbol,
+                float(volume),
+                float(executable_price),
+                float(stop_loss),
+            )
+            planned_profit = Decimal(str(calculated_profit))
+            if not planned_profit.is_finite() or planned_profit >= 0:
+                raise ValueError("invalid broker planned-loss calculation")
+            planned_loss = abs(planned_profit)
+        except (
+            AttributeError,
+            InvalidOperation,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as error:
+            logger.warning(
+                "Broker planned-loss calculation failed symbol=%s error=%s",
+                symbol,
+                error,
+            )
+            return self._risk_rejection_result(
+                "risk_calculation_invalid",
+                "Broker planned-loss calculation is unavailable or invalid",
+            )
+
+        maximum_position_risk = Decimal(str(settings.maximum_position_risk))
+        if (
+            not planned_loss.is_finite()
+            or planned_loss > risk_decision.risk_amount
+            or planned_loss > maximum_position_risk
+        ):
+            return self._risk_rejection_result(
+                "position_risk_limit_reached",
+                "Current planned loss exceeds authorized risk limits",
+            )
+
+        return None
+
+    def _risk_rejection_result(self, reason: str, comment: str) -> dict:
+        logger.warning("Market order rejected reason=%s", reason)
+        return {
+            "success": False,
+            "trading_allowed": False,
+            "blocked": True,
+            "sent": False,
+            "dry_run": False,
+            "reason": reason,
+            "comment": comment,
+        }
+
     def _position_data_rejection(self, request: dict) -> dict | None:
         try:
             positions = mt5.positions_get()
@@ -830,8 +1313,8 @@ class MT5Executor:
                 "comment": "Broker position data is unavailable",
             }
 
-        current_symbol_exposure = Decimal("0")
-        current_total_exposure = Decimal("0")
+        current_symbol_exposure = Decimal(0)
+        current_total_exposure = Decimal(0)
         correlation_positions: list[CorrelationPosition] = []
         target_symbol = str(request.get("symbol", "")).strip().upper()
 
@@ -1230,7 +1713,12 @@ class MT5Executor:
             **details,
         }
 
-    def send_order(self, request: dict) -> dict:
+    def send_order(
+        self,
+        request: dict,
+        *,
+        risk_decision: RiskDecision | None = None,
+    ) -> dict:
         """
         Send an order to MT5 only when dry_run is disabled.
         """
@@ -1264,6 +1752,13 @@ class MT5Executor:
             if news_rejection is not None:
                 return news_rejection
 
+            risk_rejection = self._risk_authorization_rejection(
+                request,
+                risk_decision,
+            )
+            if risk_rejection is not None:
+                return risk_rejection
+
             position_rejection = self._position_data_rejection(request)
             if position_rejection is not None:
                 return position_rejection
@@ -1284,6 +1779,13 @@ class MT5Executor:
                 "request": request,
                 "comment": "Dry run - order not sent",
             }
+
+        current_risk_rejection = self._current_position_risk_rejection(
+            request,
+            risk_decision,
+        )
+        if current_risk_rejection is not None:
+            return current_risk_rejection
 
         result = mt5.order_send(request)
 

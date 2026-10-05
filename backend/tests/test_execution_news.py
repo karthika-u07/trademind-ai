@@ -13,7 +13,6 @@ from backend.app.notifications import news_monitor
 from backend.app.notifications.news_monitor import NewsMonitor
 from backend.app.notifications.news_notifier import NewsNotifier
 
-
 EVENT_TIME = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
 CSV_HEADER = (
     "event_id,title,currency,impact,scheduled_at,actual,forecast,previous\n"
@@ -338,7 +337,11 @@ def test_execute_order_filters_news_using_request_symbol(
         return False, None
 
     monkeypatch.setattr(executor.news_guard, "is_news_blocked", capture_filter)
-    monkeypatch.setattr(executor, "send_order", lambda request: {"success": True})
+    monkeypatch.setattr(
+        executor,
+        "send_order",
+        lambda request, *, risk_decision=None: {"success": True},
+    )
 
     executor.execute_order({"symbol": "GBPUSD.a"})
 
