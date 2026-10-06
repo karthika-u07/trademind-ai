@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 from backend.app.news.calendar_client import (
     EconomicCalendarClient,
 )
@@ -25,6 +23,7 @@ calendar_client = EconomicCalendarClient()
 
 live_provider = LiveNewsProvider(
     client=calendar_client,
+    max_data_age_seconds=settings.news_max_data_age_seconds,
 )
 
 news_service = NewsService(
@@ -38,12 +37,10 @@ news_service = NewsService(
     provider=live_provider,
 )
 
+# The refresh cadence comes from the canonical NEWS_REFRESH_INTERVAL_SECONDS
+# setting (see Settings.news_refresh_interval_seconds); the same setting also
+# drives the executor calendar re-check and the news monitor loop.
 refresh_worker = NewsRefreshWorker(
     provider=live_provider,
-    refresh_seconds=int(
-        os.getenv(
-            "NEWS_REFRESH_INTERVAL_SECONDS",
-            "300",
-        )
-    ),
+    refresh_seconds=int(settings.news_refresh_interval_seconds),
 )

@@ -16,6 +16,27 @@ class NewsImpact(IntEnum):
     HIGH = 3
 
 
+def normalize_event_timestamp(value: datetime) -> datetime:
+    """Return a timezone-aware UTC datetime.
+
+    Naive input is treated as UTC so every comparison in the news layer is
+    deterministic and never mixes naive and aware datetimes.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
+
+
+def normalize_event_text(value: str) -> str:
+    """Normalize free text for identity comparison.
+
+    Only case and whitespace are normalized so equivalent provider
+    representations map to the same identity without hiding real edits.
+    """
+    return " ".join(str(value).split()).casefold()
+
+
 class EconomicEvent(BaseModel):
     """One economic-calendar event."""
 
@@ -38,10 +59,44 @@ class EconomicEvent(BaseModel):
     @field_validator("scheduled_at")
     @classmethod
     def normalize_timestamp(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+        return normalize_event_timestamp(value)
 
-        return value.astimezone(timezone.utc)
+    @property
+    def identity(self) -> str:
+        """Stable logical identity for deduplication and change detection.
+
+        The provider-supplied event_id is the logical key; the display-only
+        title is excluded so equivalent records that differ only in ordering
+        or wording stay the same event. Currency, impact, and timestamp keep
+        genuinely different events apart so none of them can be collapsed
+        away.
+        """
+        return "|".join(
+            [
+                f"id:{self.event_id.strip()}",
+                self.currency.strip().upper(),
+                self.impact.name.lower(),
+                normalize_event_timestamp(self.scheduled_at).isoformat(),
+            ]
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        """Content fingerprint for change detection.
+
+        Same identity with a different fingerprint means the logical event
+        was genuinely changed by the provider.
+        """
+        return "|".join(
+            [
+                normalize_event_text(self.title),
+                self.impact.name.lower(),
+                normalize_event_timestamp(self.scheduled_at).isoformat(),
+                str(self.actual or "").strip(),
+                str(self.forecast or "").strip(),
+                str(self.previous or "").strip(),
+            ]
+        )
 
 
 class NewsFilterConfig(BaseModel):
@@ -85,10 +140,7 @@ class NewsFilterResult(BaseModel):
     @field_validator("checked_at")
     @classmethod
     def normalize_timestamp(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-
-        return value.astimezone(timezone.utc)
+        return normalize_event_timestamp(value)
 
     @model_validator(mode="after")
     def dedupe_codes(self) -> "NewsFilterResult":

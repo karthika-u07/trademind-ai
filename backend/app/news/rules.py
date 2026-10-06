@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Sequence
+from typing import Iterable, Mapping, Sequence, TypeVar
 
-from backend.app.news.models import EconomicEvent, NewsFilterConfig
+from backend.app.news.models import (
+    EconomicEvent,
+    NewsFilterConfig,
+    normalize_event_timestamp,
+)
+
+EVENT_T = TypeVar("EVENT_T")
 
 CRYPTO_CURRENCY_MAP = {
     "BTCUSD": {"BTC", "USD"},
@@ -77,12 +84,24 @@ def is_inside_blocking_window(
     signal_time: datetime,
     config: NewsFilterConfig,
 ) -> bool:
-    """Return whether a signal occurs inside the event blocking window."""
+    """Return whether a signal occurs inside the event blocking window.
 
-    window_start = event_time - timedelta(minutes=config.minutes_before)
-    window_end = event_time + timedelta(minutes=config.minutes_after)
+    Both timestamps are normalized to UTC first (naive input is treated as
+    UTC) so naive and aware inputs never mix and comparisons stay
+    deterministic.
+    """
 
-    return window_start <= signal_time <= window_end
+    normalized_event_time = normalize_event_timestamp(event_time)
+    normalized_signal_time = normalize_event_timestamp(signal_time)
+
+    window_start = normalized_event_time - timedelta(
+        minutes=config.minutes_before
+    )
+    window_end = normalized_event_time + timedelta(
+        minutes=config.minutes_after
+    )
+
+    return window_start <= normalized_signal_time <= window_end
 
 
 def find_blocking_events(
@@ -103,3 +122,65 @@ def find_blocking_events(
             config,
         )
     ]
+
+
+@dataclass(frozen=True)
+class EventDiff:
+    """Difference between two calendar snapshots keyed by event identity."""
+
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    changed: tuple[str, ...] = ()
+
+    @property
+    def has_changes(self) -> bool:
+        """Return whether the snapshot differs in any meaningful way."""
+        return bool(self.added or self.removed or self.changed)
+
+
+def deduplicate_events(events: Iterable[EVENT_T]) -> list[EVENT_T]:
+    """Drop records that share a stable identity, keeping the first one.
+
+    Equivalent provider records (same logical event returned more than once,
+    in any order or representation) collapse to a single event. Genuinely
+    different events keep distinct identities and are never collapsed.
+    """
+    seen: set[str] = set()
+    unique: list[EVENT_T] = []
+
+    for event in events:
+        if event.identity in seen:
+            continue
+
+        seen.add(event.identity)
+        unique.append(event)
+
+    return unique
+
+
+def summarize_events(events: Iterable[EVENT_T]) -> dict[str, str]:
+    """Map each event's stable identity to its content fingerprint."""
+    return {event.identity: event.fingerprint for event in events}
+
+
+def diff_events(
+    previous: Mapping[str, str],
+    current: Mapping[str, str],
+) -> EventDiff:
+    """Classify events as added, removed, or changed between snapshots.
+
+    Comparison is keyed by identity, so reordering or duplicate provider
+    records never produces a false change, while real calendar edits are
+    still reported.
+    """
+    added = tuple(identity for identity in current if identity not in previous)
+    removed = tuple(
+        identity for identity in previous if identity not in current
+    )
+    changed = tuple(
+        identity
+        for identity, fingerprint in current.items()
+        if identity in previous and previous[identity] != fingerprint
+    )
+
+    return EventDiff(added=added, removed=removed, changed=changed)

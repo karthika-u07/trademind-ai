@@ -11,7 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TradingMode = Literal["paper", "demo", "live"]
@@ -28,6 +28,7 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=False,
         str_strip_whitespace=True,
+        populate_by_name=True,
     )
 
     app_name: str = "trademind-ai"
@@ -88,7 +89,21 @@ class Settings(BaseSettings):
         r"C:\Users\karth\AppData\Roaming\MetaQuotes\Terminal\Common\Files"
         r"\trademind_calendar.csv"
     )
-    news_calendar_refresh_seconds: float = Field(default=30, gt=0)
+    # Canonical news refresh cadence. It drives the economic-calendar refresh
+    # worker, the calendar-file re-check interval, and the news monitor loop.
+    # NEWS_CALENDAR_REFRESH_SECONDS is a deprecated compatibility alias only;
+    # NEWS_REFRESH_INTERVAL_SECONDS wins when both variables are set.
+    news_refresh_interval_seconds: float = Field(
+        default=30,
+        gt=0,
+        validation_alias=AliasChoices(
+            "NEWS_REFRESH_INTERVAL_SECONDS",
+            "NEWS_CALENDAR_REFRESH_SECONDS",
+        ),
+    )
+    # Calendar data older than this is treated as unavailable so the news
+    # filter fails closed instead of trusting a stale provider response.
+    news_max_data_age_seconds: float = Field(default=3600, gt=0)
     news_block_before_minutes: int = Field(
         default=DEFAULT_NEWS_BLOCK_BEFORE_MINUTES,
         ge=0,

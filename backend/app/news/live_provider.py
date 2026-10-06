@@ -8,7 +8,9 @@ from backend.app.news.calendar_client import (
     EconomicCalendarClient,
 )
 from backend.app.news.models import EconomicEvent
-from backend.app.news.rules import is_event_relevant
+from backend.app.news.rules import deduplicate_events, is_event_relevant
+
+DEFAULT_MAX_DATA_AGE_SECONDS = 3600.0
 
 
 class LiveNewsProvider:
@@ -20,8 +22,10 @@ class LiveNewsProvider:
     def __init__(
         self,
         client: EconomicCalendarClient,
+        max_data_age_seconds: float = DEFAULT_MAX_DATA_AGE_SECONDS,
     ) -> None:
         self.client = client
+        self.max_data_age_seconds = float(max_data_age_seconds)
         self._events: list[EconomicEvent] = []
         self._last_updated: datetime | None = None
         self._lock = Lock()
@@ -37,6 +41,16 @@ class LiveNewsProvider:
             start_time=now,
             end_time=end_time,
         )
+
+        if not events:
+            # An unusable empty response must not wipe a valid calendar and
+            # must never be treated as "no news"; keep the previous data so
+            # the staleness check fails closed instead.
+            raise RuntimeError(
+                "Economic calendar refresh returned no events"
+            )
+
+        events = deduplicate_events(events)
 
         with self._lock:
             self._events = events
@@ -59,9 +73,27 @@ class LiveNewsProvider:
     ) -> Sequence[EconomicEvent]:
         """
         Compatible with NewsService's NewsProvider type.
+
+        Raises when the calendar has never been refreshed or is older than
+        max_data_age_seconds so NewsService fails closed during provider
+        outages instead of trusting stale or missing data.
         """
 
-        events = self.get_events()
+        with self._lock:
+            events = list(self._events)
+            last_updated = self._last_updated
+
+        if last_updated is None:
+            raise RuntimeError(
+                "Economic calendar data has not been refreshed"
+            )
+
+        data_age = datetime.now(timezone.utc) - last_updated
+        if data_age > timedelta(seconds=self.max_data_age_seconds):
+            raise RuntimeError(
+                "Economic calendar data is older than "
+                f"{self.max_data_age_seconds} seconds"
+            )
 
         return [
             event

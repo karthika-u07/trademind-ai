@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from backend.app.config.settings import settings
 from backend.app.execution.mt5_executor import MT5Executor
+from backend.app.news.rules import diff_events, summarize_events
 from backend.app.notifications.news_notifier import NewsNotifier
 
 
@@ -15,7 +16,7 @@ STATE_PATH = Path("news_notification_state.json")
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
-CHECK_INTERVAL_SECONDS = settings.news_calendar_refresh_seconds
+CHECK_INTERVAL_SECONDS = settings.news_refresh_interval_seconds
 
 BEFORE_MINUTES = settings.news_block_before_minutes
 AFTER_MINUTES = settings.news_block_after_minutes
@@ -33,10 +34,11 @@ class NewsMonitor:
         )
         self.notifier = NewsNotifier()
 
-        self.last_events = {
-            self.event_key(event)
-            for event in self.executor.news_guard.events
-        }
+        # Identity -> fingerprint snapshot of the last notified calendar,
+        # used to report only genuine added/removed/changed events.
+        self.last_events = summarize_events(
+            self.executor.news_guard.events
+        )
         self.sent_notifications = self.load_state()
 
     def load_state(self) -> dict:
@@ -59,14 +61,8 @@ class NewsMonitor:
 
     @staticmethod
     def event_key(event) -> str:
-        return "|".join(
-            [
-                str(event.title),
-                str(event.currency),
-                str(event.impact),
-                event.event_time.isoformat(),
-            ]
-        )
+        """Stable identity for a calendar event (see NewsEvent.identity)."""
+        return event.identity
 
     @staticmethod
     def format_time(event_time: datetime) -> str:
@@ -82,17 +78,14 @@ class NewsMonitor:
         events = list(self.executor.news_guard.events)
 
         if calendar_changed:
-            current_events = {
-                self.event_key(event)
-                for event in events
-            }
-            added = len(current_events - self.last_events)
-            removed = len(self.last_events - current_events)
+            current_events = summarize_events(events)
+            diff = diff_events(self.last_events, current_events)
 
             self.notifier.send_calendar_update(
                 "TradeMind AI calendar updated\n\n"
-                f"Events added or changed: {added}\n"
-                f"Events removed or changed: {removed}\n"
+                f"Events added: {len(diff.added)}\n"
+                f"Events removed: {len(diff.removed)}\n"
+                f"Events changed: {len(diff.changed)}\n"
                 f"Current events: {len(events)}"
             )
             self.last_events = current_events

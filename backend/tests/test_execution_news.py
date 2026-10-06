@@ -101,6 +101,45 @@ def advance_mtime(path: Path) -> None:
     os.utime(path, ns=(current + 1_000_000_000, current + 1_000_000_000))
 
 
+def calendar_row(
+    *,
+    event_id: str = "event-1",
+    title: str = "CPI",
+    currency: str = "USD",
+    impact: str = "high",
+    event_time: datetime = EVENT_TIME,
+) -> dict:
+    return {
+        "event_id": event_id,
+        "title": title,
+        "currency": currency,
+        "impact": impact,
+        "scheduled_at": event_time.strftime("%Y.%m.%d %H:%M:%S"),
+    }
+
+
+def write_calendar_rows(path: Path, rows: list[dict]) -> None:
+    lines = [CSV_HEADER.rstrip("\n")]
+
+    for row in rows:
+        lines.append(
+            ",".join(
+                [
+                    row["event_id"],
+                    row["title"],
+                    row["currency"],
+                    row["impact"],
+                    row["scheduled_at"],
+                    "",
+                    "",
+                    "",
+                ]
+            )
+        )
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def test_calendar_refresh_updates_guard_events(tmp_path: Path) -> None:
     calendar = tmp_path / "calendar.csv"
     write_calendar(calendar)
@@ -421,3 +460,196 @@ def test_news_monitor_notifies_only_for_event_content_changes(
     assert monitor.load_events() == [changed_event]
     assert monitor.load_events() == [changed_event]
     assert len(monitor.notifier.calendar_updates) == 1
+
+
+def test_calendar_refresh_ignores_row_reordering(tmp_path: Path) -> None:
+    calendar = tmp_path / "calendar.csv"
+    first = calendar_row()
+    second = calendar_row(event_id="event-2", title="Nonfarm Payrolls")
+    write_calendar_rows(calendar, [first, second])
+    executor = MT5Executor(calendar_file=calendar)
+
+    assert len(executor.news_guard.events) == 2
+
+    write_calendar_rows(calendar, [second, first])
+    advance_mtime(calendar)
+
+    assert executor.refresh_calendar_events(force=True) is False
+    assert len(executor.news_guard.events) == 2
+
+
+def test_calendar_refresh_ignores_identical_rewrite(tmp_path: Path) -> None:
+    calendar = tmp_path / "calendar.csv"
+    write_calendar(calendar)
+    executor = MT5Executor(calendar_file=calendar)
+
+    write_calendar(calendar)
+    advance_mtime(calendar)
+
+    assert executor.refresh_calendar_events(force=True) is False
+    assert len(executor.news_guard.events) == 1
+
+
+def test_calendar_deduplicates_duplicate_rows(tmp_path: Path) -> None:
+    calendar = tmp_path / "calendar.csv"
+    row = calendar_row()
+    write_calendar_rows(calendar, [row, dict(row), dict(row)])
+
+    executor = MT5Executor(calendar_file=calendar)
+
+    assert len(executor.news_guard.events) == 1
+
+
+def test_calendar_refresh_detects_new_event(tmp_path: Path) -> None:
+    calendar = tmp_path / "calendar.csv"
+    first = calendar_row()
+    write_calendar_rows(calendar, [first])
+    executor = MT5Executor(calendar_file=calendar)
+
+    second = calendar_row(event_id="event-2", title="Nonfarm Payrolls")
+    write_calendar_rows(calendar, [first, second])
+    advance_mtime(calendar)
+
+    assert executor.refresh_calendar_events(force=True) is True
+    titles = {event.title for event in executor.news_guard.events}
+    assert titles == {"CPI", "Nonfarm Payrolls"}
+
+
+def test_calendar_refresh_detects_removed_event(tmp_path: Path) -> None:
+    calendar = tmp_path / "calendar.csv"
+    first = calendar_row()
+    second = calendar_row(event_id="event-2", title="Nonfarm Payrolls")
+    write_calendar_rows(calendar, [first, second])
+    executor = MT5Executor(calendar_file=calendar)
+
+    write_calendar_rows(calendar, [first])
+    advance_mtime(calendar)
+
+    assert executor.refresh_calendar_events(force=True) is True
+    assert len(executor.news_guard.events) == 1
+    assert executor.news_guard.events[0].title == "CPI"
+
+
+def test_calendar_refresh_detects_changed_event(tmp_path: Path) -> None:
+    calendar = tmp_path / "calendar.csv"
+    write_calendar_rows(calendar, [calendar_row()])
+    executor = MT5Executor(calendar_file=calendar)
+
+    write_calendar_rows(calendar, [calendar_row(title="Core CPI")])
+    advance_mtime(calendar)
+
+    assert executor.refresh_calendar_events(force=True) is True
+    assert executor.news_guard.events[0].title == "Core CPI"
+
+
+def test_news_guard_blocks_with_non_utc_aware_check_time() -> None:
+    guard = NewsGuard(
+        events=[make_event()],
+        before_minutes=10,
+        after_minutes=10,
+    )
+
+    kolkata_time = datetime(
+        2026,
+        9,
+        19,
+        17,
+        30,
+        tzinfo=timezone(timedelta(hours=5, minutes=30)),
+    )
+
+    blocked, event = guard.is_news_blocked(
+        currencies={"USD"},
+        now=kolkata_time,
+    )
+
+    assert blocked is True
+    assert event is not None
+
+
+def test_news_guard_ignores_medium_impact_events() -> None:
+    guard = NewsGuard(
+        events=[make_event(impact="medium")],
+        before_minutes=10,
+        after_minutes=10,
+    )
+
+    blocked, event = guard.is_news_blocked(
+        currencies={"USD"},
+        now=EVENT_TIME,
+    )
+
+    assert blocked is False
+    assert event is None
+
+
+def test_news_monitor_reports_added_removed_and_changed_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_events = [
+        NewsEvent(
+            title="CPI",
+            currency="USD",
+            impact="high",
+            event_time=EVENT_TIME,
+            event_id="event-1",
+        ),
+        NewsEvent(
+            title="Nonfarm Payrolls",
+            currency="USD",
+            impact="high",
+            event_time=EVENT_TIME,
+            event_id="event-2",
+        ),
+    ]
+    updated_events = [
+        NewsEvent(
+            title="Core CPI",
+            currency="USD",
+            impact="high",
+            event_time=EVENT_TIME,
+            event_id="event-1",
+        ),
+        NewsEvent(
+            title="GDP",
+            currency="USD",
+            impact="high",
+            event_time=EVENT_TIME,
+            event_id="event-3",
+        ),
+    ]
+
+    class FakeExecutor:
+        def __init__(self, **kwargs):
+            self.news_guard = SimpleNamespace(events=list(original_events))
+            self.refreshes = 0
+
+        def refresh_calendar_events(self, **kwargs):
+            self.refreshes += 1
+            if self.refreshes == 1:
+                self.news_guard.events = list(updated_events)
+                return True
+            return False
+
+    class FakeNotifier:
+        def __init__(self):
+            self.calendar_updates = []
+
+        def send_calendar_update(self, message: str) -> None:
+            self.calendar_updates.append(message)
+
+    monkeypatch.setattr(news_monitor, "MT5Executor", FakeExecutor)
+    monkeypatch.setattr(news_monitor, "NewsNotifier", FakeNotifier)
+    monkeypatch.setattr(NewsMonitor, "load_state", lambda self: {})
+    monitor = NewsMonitor()
+
+    monitor.load_events()
+    monitor.load_events()
+
+    assert len(monitor.notifier.calendar_updates) == 1
+
+    message = monitor.notifier.calendar_updates[0]
+    assert "Events added: 1" in message
+    assert "Events removed: 1" in message
+    assert "Events changed: 1" in message
+    assert "Current events: 2" in message
