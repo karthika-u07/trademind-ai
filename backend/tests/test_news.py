@@ -1,8 +1,11 @@
+import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
 
+from backend.app.config.settings import settings
 from backend.app.news import (
     EconomicEvent,
     NewsFilterConfig,
@@ -10,12 +13,18 @@ from backend.app.news import (
     NewsImpact,
     NewsService,
 )
+from backend.app.news.calendar_client import EconomicCalendarClient
+from backend.app.news.live_provider import LiveNewsProvider
 from backend.app.news.rules import (
+    deduplicate_events,
+    diff_events,
     extract_symbol_currencies,
     find_blocking_events,
     is_event_relevant,
     is_inside_blocking_window,
+    summarize_events,
 )
+from backend.app.news.runtime import refresh_worker
 
 
 BASE_TIME = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
@@ -24,17 +33,40 @@ BASE_TIME = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
 def make_event(
     *,
     event_id: str = "event-1",
+    title: str = "Consumer Price Index",
     currency: str = "USD",
     impact: NewsImpact = NewsImpact.HIGH,
     scheduled_at: datetime = BASE_TIME,
 ) -> EconomicEvent:
     return EconomicEvent(
         event_id=event_id,
-        title="Consumer Price Index",
+        title=title,
         currency=currency,
         impact=impact,
         scheduled_at=scheduled_at,
     )
+
+
+class StubCalendarClient:
+    """Minimal async calendar client used to exercise LiveNewsProvider."""
+
+    def __init__(
+        self,
+        events: list[EconomicEvent] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.events = events or []
+        self.error = error
+
+    async def fetch_events(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[EconomicEvent]:
+        if self.error is not None:
+            raise self.error
+
+        return list(self.events)
 
 
 def test_extract_symbol_currencies() -> None:
@@ -284,3 +316,266 @@ def test_news_config_rejects_negative_window() -> None:
 def test_news_config_rejects_zero_windows() -> None:
     with pytest.raises(ValidationError):
         NewsFilterConfig(minutes_before=0, minutes_after=0)
+
+
+def test_live_provider_deduplicates_duplicate_records() -> None:
+    event = make_event()
+    duplicate = make_event()
+    other = make_event(event_id="event-2", title="Nonfarm Payrolls")
+
+    provider = LiveNewsProvider(
+        StubCalendarClient([event, duplicate, other])
+    )
+
+    events = asyncio.run(provider.refresh())
+
+    assert len(events) == 2
+    assert len(provider.get_events()) == 2
+
+
+def test_live_provider_rejects_empty_refresh_and_keeps_previous_events() -> None:
+    client = StubCalendarClient([make_event()])
+    provider = LiveNewsProvider(client)
+
+    asyncio.run(provider.refresh())
+
+    client.events = []
+
+    with pytest.raises(RuntimeError, match="no events"):
+        asyncio.run(provider.refresh())
+
+    assert len(provider.get_events()) == 1
+
+
+def test_live_provider_failure_preserves_last_valid_events() -> None:
+    client = StubCalendarClient([make_event()])
+    provider = LiveNewsProvider(client)
+
+    asyncio.run(provider.refresh())
+
+    client.error = RuntimeError("provider timeout")
+
+    with pytest.raises(RuntimeError, match="provider timeout"):
+        asyncio.run(provider.refresh())
+
+    assert len(provider.get_events()) == 1
+
+
+def test_news_service_blocks_when_provider_has_never_been_refreshed() -> None:
+    provider = LiveNewsProvider(StubCalendarClient([make_event()]))
+    service = NewsService(provider=provider)
+
+    result = service.evaluate("EURUSD", BASE_TIME)
+
+    assert result.allowed is False
+    assert result.blocked is True
+    assert "NEWS_PROVIDER_ERROR" in result.reason_codes
+    assert "NEWS_BLOCKED" in result.reason_codes
+
+
+def test_news_service_blocks_when_provider_data_is_stale() -> None:
+    provider = LiveNewsProvider(
+        StubCalendarClient([make_event()]),
+        max_data_age_seconds=60,
+    )
+    asyncio.run(provider.refresh())
+    provider._last_updated = (
+        datetime.now(timezone.utc) - timedelta(seconds=120)
+    )
+
+    service = NewsService(provider=provider)
+    result = service.evaluate("EURUSD", BASE_TIME)
+
+    assert result.allowed is False
+    assert result.blocked is True
+    assert "NEWS_PROVIDER_ERROR" in result.reason_codes
+    assert "NEWS_BLOCKED" in result.reason_codes
+
+
+def test_news_service_allows_fresh_provider_data_when_news_is_clear() -> None:
+    provider = LiveNewsProvider(
+        StubCalendarClient(
+            [make_event(scheduled_at=BASE_TIME + timedelta(hours=6))]
+        )
+    )
+    asyncio.run(provider.refresh())
+
+    service = NewsService(provider=provider)
+    result = service.evaluate("EURUSD", BASE_TIME)
+
+    assert result.allowed is True
+    assert result.blocked is False
+    assert result.reason_codes == ["NEWS_CLEAR"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"unexpected": "shape"},
+        {"events": "not-a-list"},
+        {"events": None},
+        42,
+        "events",
+    ],
+)
+def test_invalid_calendar_payload_is_rejected(payload) -> None:
+    client = EconomicCalendarClient(
+        base_url="http://calendar.test",
+        api_key="test-key",
+    )
+
+    with pytest.raises(ValueError):
+        client._normalize_events(payload)
+
+
+def test_calendar_payload_keeps_valid_rows_and_skips_invalid_ones() -> None:
+    client = EconomicCalendarClient(
+        base_url="http://calendar.test",
+        api_key="test-key",
+    )
+    payload = {
+        "events": [
+            {
+                "event_id": "event-1",
+                "title": "CPI",
+                "currency": "USD",
+                "impact": "high",
+                "scheduled_at": "2026-09-11T12:00:00Z",
+            },
+            "not-a-dict",
+            {"foo": "bar"},
+        ]
+    }
+
+    events = client._normalize_events(payload)
+
+    assert len(events) == 1
+    assert events[0].event_id == "event-1"
+
+
+def test_diff_distinguishes_added_removed_and_changed_events() -> None:
+    previous = summarize_events(
+        [
+            make_event(event_id="event-1", title="CPI"),
+            make_event(event_id="event-2", title="Nonfarm Payrolls"),
+        ]
+    )
+    current = summarize_events(
+        [
+            make_event(event_id="event-1", title="Core CPI"),
+            make_event(event_id="event-3", title="GDP"),
+        ]
+    )
+
+    diff = diff_events(previous, current)
+
+    assert diff.added == (make_event(event_id="event-3").identity,)
+    assert diff.removed == (
+        make_event(event_id="event-2", title="Nonfarm Payrolls").identity,
+    )
+    assert diff.changed == (make_event(event_id="event-1", title="CPI").identity,)
+    assert diff.has_changes is True
+
+
+def test_diff_ignores_reordered_and_duplicate_records() -> None:
+    events = [
+        make_event(event_id="event-1"),
+        make_event(event_id="event-2", title="Nonfarm Payrolls"),
+    ]
+    previous = summarize_events(events)
+    current = summarize_events(
+        deduplicate_events([events[1], events[0], events[0]])
+    )
+
+    diff = diff_events(previous, current)
+
+    assert diff.has_changes is False
+    assert diff.added == ()
+    assert diff.removed == ()
+    assert diff.changed == ()
+
+
+def test_equivalent_timezone_representations_share_identity() -> None:
+    utc_event = make_event(
+        scheduled_at=datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+    )
+    offset_event = make_event(
+        scheduled_at=datetime(
+            2026,
+            9,
+            11,
+            17,
+            30,
+            tzinfo=timezone(timedelta(hours=5, minutes=30)),
+        )
+    )
+
+    assert utc_event.identity == offset_event.identity
+    assert utc_event.fingerprint == offset_event.fingerprint
+    assert len(deduplicate_events([utc_event, offset_event])) == 1
+
+
+def test_blocking_window_normalizes_naive_and_aware_inputs() -> None:
+    config = NewsFilterConfig(minutes_before=30, minutes_after=30)
+    event_time = datetime(2026, 9, 11, 10, 30, tzinfo=timezone.utc)
+
+    aware_signal = datetime(
+        2026,
+        9,
+        11,
+        12,
+        0,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+    naive_signal = datetime(2026, 9, 11, 12, 0)
+
+    assert is_inside_blocking_window(event_time, aware_signal, config) is True
+    assert is_inside_blocking_window(event_time, naive_signal, config) is False
+
+
+def test_news_service_accepts_naive_signal_time() -> None:
+    service = NewsService(provider=lambda symbol, checked_at: [])
+
+    result = service.evaluate("EURUSD", datetime(2026, 9, 11, 12, 0))
+
+    assert result.allowed is True
+    assert result.checked_at.tzinfo is not None
+
+
+def test_medium_impact_event_blocks_when_configured() -> None:
+    config = NewsFilterConfig(
+        minimum_impact=NewsImpact.MEDIUM,
+        minutes_before=10,
+        minutes_after=10,
+    )
+    medium_event = make_event(impact=NewsImpact.MEDIUM)
+    service = NewsService(
+        config=config,
+        provider=lambda symbol, checked_at: [medium_event],
+    )
+
+    result = service.evaluate("EURUSD", BASE_TIME)
+
+    assert result.allowed is False
+    assert result.blocked is True
+    assert "NEWS_BLOCKED" in result.reason_codes
+
+
+def test_medium_impact_event_is_ignored_by_default() -> None:
+    medium_event = make_event(impact=NewsImpact.MEDIUM)
+    service = NewsService(provider=lambda symbol, checked_at: [medium_event])
+
+    result = service.evaluate("EURUSD", BASE_TIME)
+
+    assert result.allowed is True
+    assert result.reason_codes == ["NEWS_CLEAR"]
+
+
+def test_refresh_worker_uses_canonical_refresh_setting() -> None:
+    """The runtime reads the canonical setting, not a raw environment variable."""
+    from backend.app.news import runtime as runtime_module
+
+    assert "os.getenv" not in inspect.getsource(runtime_module)
+    assert refresh_worker.refresh_seconds == int(
+        settings.news_refresh_interval_seconds
+    )

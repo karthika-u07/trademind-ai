@@ -84,15 +84,26 @@ class EconomicCalendarClient:
         raw_events = payload
 
         if isinstance(payload, dict):
-            raw_events = (
-                payload.get("events")
-                or payload.get("data")
-                or []
+            if "events" in payload:
+                raw_events = payload["events"]
+            elif "data" in payload:
+                raw_events = payload["data"]
+            else:
+                raise ValueError(
+                    "Economic calendar response is missing "
+                    "'events' or 'data'"
+                )
+
+        if not isinstance(raw_events, list):
+            raise ValueError(
+                "Economic calendar response events must be a list"
             )
 
         events: list[EconomicEvent] = []
 
         for item in raw_events:
+            if not isinstance(item, dict):
+                continue
             event_id = str(
                 item.get("event_id")
                 or item.get("id")

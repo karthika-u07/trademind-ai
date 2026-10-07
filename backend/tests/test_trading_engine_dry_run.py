@@ -66,6 +66,7 @@ def test_buy_path_dry_run(
             currency="USD",
         ),
         positions_get=lambda: (),
+        orders_get=lambda: (),
         symbol_info=lambda symbol: symbol_info,
         symbol_select=lambda symbol, selected: True,
         symbol_info_tick=lambda symbol: tick,

@@ -6,6 +6,10 @@ from backend.app.config.settings import (
     DEFAULT_NEWS_BLOCK_AFTER_MINUTES,
     DEFAULT_NEWS_BLOCK_BEFORE_MINUTES,
 )
+from backend.app.news.models import (
+    normalize_event_text,
+    normalize_event_timestamp,
+)
 
 
 @dataclass
@@ -14,6 +18,53 @@ class NewsEvent:
     currency: str
     impact: str
     event_time: datetime
+    event_id: Optional[str] = None
+
+    @property
+    def identity(self) -> str:
+        """Stable logical identity for deduplication and change detection.
+
+        When the provider supplies an event_id it is trusted as the logical
+        key and the display-only title is excluded, so equivalent records
+        that differ in ordering or wording map to the same event. Impact and
+        timestamp stay in the identity so genuinely different events (for
+        example batched releases sharing one id) never collapse into one.
+        Without an event_id the full normalized content forms the identity.
+        """
+        currency = self.currency.strip().upper()
+        impact = self.impact.strip().lower()
+        event_time = normalize_event_timestamp(self.event_time).isoformat()
+
+        if self.event_id:
+            return "|".join(
+                [f"id:{self.event_id.strip()}", currency, impact, event_time]
+            )
+
+        return "|".join(
+            [
+                "key",
+                normalize_event_text(self.title),
+                currency,
+                impact,
+                event_time,
+            ]
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        """Content fingerprint for change detection.
+
+        Same identity with a different fingerprint means the logical event
+        was genuinely changed by the calendar source.
+        """
+        return "|".join(
+            [
+                normalize_event_text(self.title),
+                self.currency.strip().upper(),
+                self.impact.strip().lower(),
+                normalize_event_timestamp(self.event_time).isoformat(),
+            ]
+        )
 
 
 class NewsGuard:

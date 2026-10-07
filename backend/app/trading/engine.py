@@ -1,4 +1,4 @@
-﻿"""Live TradeMind trading orchestration engine.
+"""Live TradeMind trading orchestration engine.
 
 The engine coordinates existing market-data, indicator, regime, strategy,
 risk, news, and MT5 execution components. It does not duplicate strategy
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -18,6 +19,14 @@ import MetaTrader5 as mt5
 
 from backend.app.config.settings import settings
 from backend.app.execution.mt5_executor import MT5Executor
+from backend.app.execution.reconciliation import (
+    RECONCILIATION_REFRESH_SECONDS,
+    TRADEMIND_MAGIC_NUMBER,
+    BrokerReconciliationService,
+    ReconciliationResult,
+    ReconciliationStatus,
+
+)
 from backend.app.indicators.service import TechnicalFeatureService
 from backend.app.market.service import MarketDataService
 from backend.app.regime.classifier import MarketRegimeClassifier
@@ -33,6 +42,7 @@ from backend.app.risk.models import (
 from backend.app.risk.service import RiskService
 from backend.app.strategy.models import StrategyConfig, StrategySignal
 from backend.app.strategy.service import StrategyService
+from backend.app.trading.status import derive_trading_status
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +90,15 @@ class TradingEngine:
         )
 
         self._connected = False
-        self._last_processed_candle: datetime | None = None
+        self._broker_reconciliation = BrokerReconciliationService(
+            magic_number=TRADEMIND_MAGIC_NUMBER,
+            managed_symbols={self.symbol},
+        )
+        self._mt5_session_active = False
+        self._reconciliation_due = True
+        self._last_reconciliation_monotonic: float | None = None
+        self._last_processed_candle = None
+
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -101,12 +119,33 @@ class TradingEngine:
             raise
 
         self._connected = True
+        self._mt5_session_active = True
+        self._reconciliation_due = True
+
         logger.info(
             "trading_engine_connected symbol=%s timeframe=%s dry_run=%s",
             self.symbol,
             self.timeframe,
             self.dry_run,
         )
+
+        try:
+            result = self._run_reconciliation()
+
+            if not result.safe:
+                logger.critical(
+                    "trading_engine_not_ready_after_reconciliation "
+                    "status=%s reasons=%s",
+                    result.status.value,
+                    result.reason_codes,
+                )
+
+        except Exception:
+            self._connected = False
+            self._mt5_session_active = False
+            self.executor.disconnect()
+            self.market.disconnect()
+            raise
 
     def disconnect(self) -> None:
         """Disconnect MT5-backed components."""
@@ -120,6 +159,23 @@ class TradingEngine:
             self.executor.disconnect()
 
         self._connected = False
+        self._mt5_session_active = False
+        self._reconciliation_due = True
+        self._last_reconciliation_monotonic = None
+
+        state = self._load_state()
+        state["reconciliation_block"] = True
+
+        reconciliation = state.get("reconciliation")
+
+        if isinstance(reconciliation, dict):
+            reconciliation["mt5_connected"] = False
+            reconciliation["status"] = (
+                ReconciliationStatus.RECONCILIATION_REQUIRED.value
+            )
+
+        self._save_state(state)
+
         logger.info("trading_engine_disconnected")
 
     # ------------------------------------------------------------------
@@ -127,9 +183,18 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     def _load_state(self) -> dict[str, Any]:
+        state, _ = self._load_state_with_status()
+        return state
+
+    def _load_state_with_status(self) -> tuple[dict[str, Any], bool]:
+        """Load persisted state; the second value reports corruption.
+
+        Corruption fails closed: callers receive the kill-switch sentinel
+        plus an explicit flag so reconciliation can report it honestly.
+        """
         try:
             if not self.state_file.exists():
-                return {}
+                return {}, False
             state = json.loads(
                 self.state_file.read_text(encoding="utf-8")
             )
@@ -148,12 +213,12 @@ class TradingEngine:
                 day_start_equity = Decimal(str(state["day_start_equity"]))
                 if not day_start_equity.is_finite() or day_start_equity < 0:
                     raise ValueError("day_start_equity must be finite and non-negative")
-            return state
+            return state, False
         except (InvalidOperation, OSError, json.JSONDecodeError, ValueError):
             logger.warning(
                 "Unable to read trading state; activating kill switch"
             )
-            return {"kill_switch_enabled": True}
+            return {"kill_switch_enabled": True}, True
 
     def _save_state(self, state: dict[str, Any]) -> None:
         temporary = self.state_file.with_suffix(".tmp")
@@ -216,6 +281,145 @@ class TradingEngine:
             "Invalid runtime kill switch value; activating kill switch"
         )
         return True
+
+
+        # ------------------------------------------------------------------
+    # Broker reconciliation / restart safety
+    # ------------------------------------------------------------------
+
+    def _reconciliation_block_enabled(
+        self,
+        state: dict[str, Any] | None = None,
+    ) -> bool:
+        """Read persisted reconciliation block state, failing closed."""
+
+        state = self._load_state() if state is None else state
+
+        value = state.get("reconciliation_block", False)
+
+        if isinstance(value, bool):
+            return value
+
+        logger.warning(
+            "Invalid reconciliation block value; failing closed"
+        )
+        return True
+
+    def _reconciliation_stale(self) -> bool:
+        """Return True when a fresh broker reconciliation is required."""
+
+        if self._last_reconciliation_monotonic is None:
+            return True
+
+        return (
+            time.monotonic() - self._last_reconciliation_monotonic
+            >= RECONCILIATION_REFRESH_SECONDS
+        )
+
+    def _run_reconciliation(self) -> ReconciliationResult:
+        """Perform a fresh broker-state reconciliation."""
+
+        state, state_corrupted = self._load_state_with_status()
+
+        logger.info(
+            "reconciliation_started symbol=%s",
+            self.symbol,
+        )
+
+        try:
+            result = self._broker_reconciliation.reconcile_from_broker(
+                positions_reader=mt5.positions_get,
+                orders_reader=mt5.orders_get,
+                local_state=state,
+                local_state_corrupted=state_corrupted,
+            )
+        except Exception:
+            logger.exception(
+                "reconciliation_unexpected_failure symbol=%s",
+                self.symbol,
+            )
+
+            result = ReconciliationResult(
+                status=ReconciliationStatus.RECONCILIATION_FAILED,
+                reason_codes=[
+                    "RECONCILIATION_UNEXPECTED_FAILURE"
+                ],
+                broker_position_count=0,
+                local_position_count=0,
+            )
+
+        reconciliation = {
+            "checked_at": result.checked_at.isoformat(),
+            "status": result.status.value,
+            "reason_codes": result.reason_codes,
+            "unexpected_tickets": result.unexpected_tickets,
+            "missing_tickets": result.missing_tickets,
+            "duplicate_tickets": result.duplicate_tickets,
+            "pending_order_tickets": result.pending_order_tickets,
+            "broker_position_count": result.broker_position_count,
+            "local_position_count": result.local_position_count,
+            "mt5_connected": True,
+        }
+
+        state["reconciliation"] = reconciliation
+        state["reconciliation_block"] = not result.new_entries_allowed
+
+        self._save_state(state)
+
+        self._last_reconciliation_monotonic = time.monotonic()
+        self._reconciliation_due = False
+
+        if result.safe:
+            logger.info(
+                "reconciliation_success symbol=%s positions=%s",
+                self.symbol,
+                result.broker_position_count,
+            )
+        else:
+            logger.critical(
+                "reconciliation_failed symbol=%s status=%s reasons=%s",
+                self.symbol,
+                result.status.value,
+                result.reason_codes,
+            )
+
+        return result
+
+    def _readiness_gate(self) -> bool:
+        """Return True only when broker state is safe for new entries."""
+
+        if not self._connected:
+            return False
+
+        # Lightweight/unit-test instances may bypass __init__().
+        # They must not accidentally trigger broker reconciliation.
+        if not hasattr(self, "_broker_reconciliation"):
+            return True
+
+        reconciliation_due = getattr(self, "_reconciliation_due", False)
+
+        if reconciliation_due or self._reconciliation_stale():
+            result = self._run_reconciliation()
+            return result.safe
+
+        state = self._load_state()
+
+        reconciliation = state.get("reconciliation")
+
+        if not isinstance(reconciliation, dict):
+            return False
+
+        if reconciliation.get("status") != (
+            ReconciliationStatus.RECONCILED.value
+        ):
+            return False
+
+        return (
+            reconciliation.get("mt5_connected") is True
+            and not self._runtime_kill_switch_enabled(state)
+            and not self._reconciliation_block_enabled(state)
+        )
+
 
     # ------------------------------------------------------------------
     # MT5 snapshots
@@ -316,7 +520,10 @@ class TradingEngine:
             day_start_equity=day_start_equity,
             current_equity=account.equity,
             open_positions=len(positions),
-            kill_switch_enabled=self._runtime_kill_switch_enabled(runtime_state),
+            kill_switch_enabled=(
+                self._runtime_kill_switch_enabled(runtime_state)
+                or self._reconciliation_block_enabled(runtime_state)
+            ),
             current_symbol_exposure=current_symbol_exposure,
             current_total_exposure=current_total_exposure,
         )
@@ -410,6 +617,23 @@ class TradingEngine:
 
         if not self._connected:
             self.connect()
+
+        if not self._connected:
+            return {
+                "status": "TRADING_BLOCKED",
+                "reason": "MT5_NOT_CONNECTED",
+            }
+
+        if not self._readiness_gate():
+            logger.warning(
+                "trading_blocked_reconciliation symbol=%s",
+                self.symbol,
+            )
+
+            return {
+                "status": "TRADING_BLOCKED",
+                "reason": "RECONCILIATION_NOT_SAFE",
+            }
 
         candles, features, regime, strategy_result = (
             self._run_analysis()

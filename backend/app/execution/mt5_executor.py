@@ -23,7 +23,12 @@ from backend.app.correlation.service import (
 )
 from backend.app.execution.news_guard import NewsEvent, NewsGuard
 from backend.app.execution.safety import ExecutionGate
-from backend.app.news.rules import extract_symbol_currencies
+from backend.app.news.rules import (
+    deduplicate_events,
+    diff_events,
+    extract_symbol_currencies,
+    summarize_events,
+)
 from backend.app.position_management.models import (
     PositionManagementAction,
     PositionManagementDecision,
@@ -70,7 +75,7 @@ class MT5Executor:
         self.calendar_refresh_seconds = (
             calendar_refresh_seconds
             if calendar_refresh_seconds is not None
-            else settings.news_calendar_refresh_seconds
+            else settings.news_refresh_interval_seconds
         )
         self._calendar_mtime_ns: int | None = None
         self._last_calendar_check = 0.0
@@ -133,6 +138,10 @@ class MT5Executor:
                             row.get("scheduled_at") or ""
                         ).strip()
 
+                        event_id = (
+                            row.get("event_id") or ""
+                        ).strip()
+
                         if not title:
                             raise ValueError("title is empty")
 
@@ -153,6 +162,7 @@ class MT5Executor:
                                 currency=currency,
                                 impact=impact,
                                 event_time=event_time,
+                                event_id=event_id or None,
                             )
                         )
 
@@ -220,12 +230,22 @@ class MT5Executor:
                 )
                 return False
 
+            events = deduplicate_events(events)
+
             previous_mtime = self._calendar_mtime_ns
             self._calendar_mtime_ns = modified_at
             self._calendar_verified = True
             self._calendar_refresh_healthy = True
 
-            if events == self.news_guard.events:
+            # Compare snapshots by stable event identity so reordering or
+            # duplicate provider rows never count as a calendar change,
+            # while genuinely added, removed, or changed events do.
+            diff = diff_events(
+                summarize_events(self.news_guard.events),
+                summarize_events(events),
+            )
+
+            if not diff.has_changes:
                 if previous_mtime is None:
                     logger.info("News calendar loaded: %d events", len(events))
                 return False
@@ -235,7 +255,14 @@ class MT5Executor:
             if previous_mtime is None:
                 logger.info("News calendar loaded: %d events", len(events))
             else:
-                logger.info("News calendar refreshed: %d events", len(events))
+                logger.info(
+                    "News calendar refreshed: %d events "
+                    "(added=%d removed=%d changed=%d)",
+                    len(events),
+                    len(diff.added),
+                    len(diff.removed),
+                    len(diff.changed),
+                )
 
             return True
 
