@@ -335,6 +335,54 @@ class MT5Executor:
                 )
 
         return True
+    
+    def _recover_mt5_connection(self) -> bool:
+        """Recover a broken MT5 IPC connection once."""
+
+        if mt5 is None:
+            return False
+
+        try:
+            mt5.shutdown()
+        except Exception:
+            logger.exception("MT5 shutdown during IPC recovery failed")
+
+        self.connected = False
+
+        if not mt5.initialize():
+            logger.error(
+                "MT5 IPC recovery initialization failed: %s",
+                mt5.last_error(),
+            )
+            return False
+
+        terminal_info = mt5.terminal_info()
+        account_info = mt5.account_info()
+
+        if terminal_info is None or account_info is None:
+            logger.error(
+                "MT5 IPC recovery validation failed: terminal=%s account=%s error=%s",
+                terminal_info is not None,
+                account_info is not None,
+                mt5.last_error(),
+            )
+            try:
+                mt5.shutdown()
+            except Exception:
+                logger.exception(
+                    "MT5 shutdown after failed IPC recovery validation failed"
+                )
+            return False
+
+        self.connected = True
+
+        logger.warning(
+            "MT5 IPC connection recovered: account=%s server=%s",
+            account_info.login,
+            account_info.server,
+        )
+
+        return True
 
     def get_open_positions(self) -> list[dict]:
         """Return normalized snapshots of all currently open MT5 positions."""
@@ -343,10 +391,22 @@ class MT5Executor:
             raise RuntimeError("MT5 is not connected")
 
         positions = mt5.positions_get()
+
         if positions is None:
-            raise RuntimeError(
-                f"MT5 positions_get failed: {mt5.last_error()}"
-            )
+            error = mt5.last_error()
+
+            if error[0] == -10001:
+                logger.warning(
+                    "MT5 positions_get IPC failure; attempting one connection recovery"
+                )
+
+                if self._recover_mt5_connection():
+                    positions = mt5.positions_get()
+
+            if positions is None:
+                raise RuntimeError(
+                    f"MT5 positions_get failed: {mt5.last_error()}"
+                )
 
         snapshots: list[dict] = []
         for position in positions:
