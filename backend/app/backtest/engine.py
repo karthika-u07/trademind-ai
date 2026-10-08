@@ -194,7 +194,8 @@ class HistoricalBacktestEngine:
                 else:
                     price_difference = entry_price - Decimal(str(exit_price))
                 gross_pnl = calculate_price_pnl(price_difference, symbol_meta.tick_size, symbol_meta.tick_value, volume)
-                fees = execution.fees_for(abs(gross_pnl))
+                notional = entry_price * volume * symbol_meta.contract_size
+                fees = execution.fees_for(notional)
                 net_pnl = gross_pnl - fees
                 trade = BacktestTrade(
                     trade_id=str(position["trade_id"]),
@@ -310,7 +311,10 @@ class HistoricalBacktestEngine:
                 symbol_meta.tick_value,
                 Decimal(str(position["entry_volume"])),
             )
-            fees = execution.fees_for(abs(gross_pnl))
+            entry_price = Decimal(str(position["entry_price"]))
+            entry_volume = Decimal(str(position["entry_volume"]))
+            notional = entry_price * entry_volume * symbol_meta.contract_size
+            fees = execution.fees_for(notional)
             net_pnl = gross_pnl - fees
             trade = BacktestTrade(
                 trade_id=str(position["trade_id"]),

@@ -308,7 +308,12 @@ def test_trade_records_entry_slippage_and_end_of_backtest_fee() -> None:
     assert trade.slippage_cost == expected_slippage
     assert trade.slippage_cost > Decimal("0")
     assert trade.exit_reason == ExitReason.END_OF_BACKTEST
-    assert trade.fees == abs(trade.gross_pnl) * fee_rate
+    expected_notional = (
+        trade.entry_price
+        * trade.entry_volume
+        * Decimal("100000")
+    )
+    assert trade.fees == expected_notional * fee_rate
     assert result.equity_curve[-1].equity == result.initial_capital + trade.net_pnl
 
 
