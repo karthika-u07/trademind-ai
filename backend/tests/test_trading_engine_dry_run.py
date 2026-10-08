@@ -14,6 +14,7 @@ from backend.app.risk.models import ProposedTrade, RiskConfig
 from backend.app.strategy.models import StrategySignal
 from backend.app.trading import engine as trading_engine
 from backend.app.trading.engine import TradingEngine
+from backend.app.market import service as market_service
 
 
 def test_buy_path_dry_run(
@@ -70,6 +71,7 @@ def test_buy_path_dry_run(
         symbol_info=lambda symbol: symbol_info,
         symbol_select=lambda symbol, selected: True,
         symbol_info_tick=lambda symbol: tick,
+        order_calc_profit=lambda order_type, symbol, volume, entry, exit: 100.0,
         order_check=lambda request: check_result_type(0, "Done"),
         order_send=fail_order_send,
         last_error=lambda: (0, "Success"),
@@ -83,6 +85,7 @@ def test_buy_path_dry_run(
     monkeypatch.setattr(mt5_executor, "mt5", fake_mt5)
     monkeypatch.setattr(mt5_client, "mt5", fake_mt5)
     monkeypatch.setattr(trading_engine, "mt5", fake_mt5)
+    monkeypatch.setattr(market_service, "mt5", fake_mt5)
 
     engine = TradingEngine(
         symbol="EURUSD",

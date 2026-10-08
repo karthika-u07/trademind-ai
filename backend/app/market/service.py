@@ -54,12 +54,56 @@ class MarketDataService:
         }
 
     def get_symbol_metadata(self, symbol: str) -> dict[str, Any]:
-        """Return symbol information required by the risk engine."""
+        """Return verified symbol information required by the risk engine."""
 
         normalized_symbol = symbol.strip().upper()
 
         self.client.ensure_symbol_visible(normalized_symbol)
         info = self.client.symbol_info(normalized_symbol)
+
+        reported_tick_value = float(info.trade_tick_value)
+        tick_size = float(info.trade_tick_size)
+
+        if tick_size <= 0 or reported_tick_value <= 0:
+            raise RuntimeError(
+                f"Invalid tick metadata for {normalized_symbol}: "
+                f"tick_size={tick_size}, tick_value={reported_tick_value}"
+            )
+
+        tick = mt5.symbol_info_tick(normalized_symbol)
+        if tick is None or float(tick.ask) <= 0:
+            raise RuntimeError(
+                f"No valid market tick for {normalized_symbol}: "
+                f"{mt5.last_error()}"
+            )
+
+        verification_move = tick_size * 100.0
+        calculated_profit = mt5.order_calc_profit(
+            mt5.ORDER_TYPE_BUY,
+            normalized_symbol,
+            1.0,
+            float(tick.ask),
+            float(tick.ask) + verification_move,
+        )
+
+        if calculated_profit is None or calculated_profit <= 0:
+            raise RuntimeError(
+                f"order_calc_profit failed for {normalized_symbol}: "
+                f"{mt5.last_error()}"
+            )
+
+        derived_tick_value = float(calculated_profit) / 100.0
+
+        relative_difference = (
+            abs(derived_tick_value - reported_tick_value) / derived_tick_value
+        )
+
+        if relative_difference > 0.02:
+            raise RuntimeError(
+                f"tick_value_mismatch {normalized_symbol}: "
+                f"reported={reported_tick_value}, "
+                f"derived={derived_tick_value}"
+            )
 
         return {
             "symbol": normalized_symbol,
@@ -69,8 +113,8 @@ class MarketDataService:
             "currency_margin": info.currency_margin,
             "digits": int(info.digits),
             "point": float(info.point),
-            "trade_tick_size": float(info.trade_tick_size),
-            "trade_tick_value": float(info.trade_tick_value),
+            "trade_tick_size": tick_size,
+            "trade_tick_value": derived_tick_value,
             "volume_min": float(info.volume_min),
             "volume_max": float(info.volume_max),
             "volume_step": float(info.volume_step),
