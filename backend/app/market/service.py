@@ -2,9 +2,33 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ModuleNotFoundError as error:
+    if error.name != "MetaTrader5":
+        raise
+
+    def _missing_mt5(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError(
+            "MetaTrader5 package is required for live market data"
+        )
+
+    mt5 = SimpleNamespace(
+        TIMEFRAME_M1=1,
+        TIMEFRAME_M5=5,
+        TIMEFRAME_M15=15,
+        TIMEFRAME_M30=30,
+        TIMEFRAME_H1=16385,
+        TIMEFRAME_H4=16388,
+        TIMEFRAME_D1=16408,
+        ORDER_TYPE_BUY=0,
+        symbol_info_tick=_missing_mt5,
+        order_calc_profit=_missing_mt5,
+        last_error=lambda: "MetaTrader5 package is not installed",
+    )
 
 from backend.app.market.mt5_client import MT5Client
 
