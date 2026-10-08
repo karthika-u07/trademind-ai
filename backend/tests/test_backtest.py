@@ -16,6 +16,7 @@ from backend.app.news.service import NewsService
 from backend.app.risk.models import RiskConfig
 from backend.app.risk.service import RiskService
 from backend.app.risk.sizing import calculate_price_pnl
+from backend.app.strategy.models import StrategySignal
 
 
 class RecordingRiskService(RiskService):
@@ -115,6 +116,23 @@ def test_no_trade_on_hold_signal() -> None:
     result = HistoricalBacktestEngine().run(ds)
     assert result.trades == [] or all(trade.exit_reason in {"END_OF_BACKTEST", "STOP_LOSS", "TAKE_PROFIT"} for trade in result.trades)
 
+def test_invalid_atr_does_not_create_backtest_entry(monkeypatch) -> None:
+    engine = configured_engine()
+
+    class InvalidAtrStrategy:
+        signal = StrategySignal.BUY
+        feature_ready = False
+        atr = None
+
+    monkeypatch.setattr(
+        engine.strategy_service,
+        "generate_signal",
+        lambda features, regime: InvalidAtrStrategy(),
+    )
+
+    result = engine.run(trending_candles())
+
+    assert result.trades == []
 
 def test_backtest_skips_news_filter_when_disabled() -> None:
     def unexpected_provider(symbol: str, checked_at: datetime):

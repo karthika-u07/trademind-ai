@@ -145,8 +145,10 @@ class MarketDataService:
         candles = self.client.rates(
             normalized_symbol,
             self.TIMEFRAMES[timeframe],
-            count=count,
+            count=count + 1,
         )
+        if len(candles) > count:
+            candles = candles[:-1]
 
         normalized_candles = []
 
