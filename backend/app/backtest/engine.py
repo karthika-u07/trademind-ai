@@ -128,9 +128,9 @@ class HistoricalBacktestEngine:
         self._validate_candles(candles)
 
         symbol_meta = get_symbol_metadata(
-    symbol,
-    account_currency=self.config.account_currency,
-)
+            symbol,
+            account_currency=self.config.account_currency,
+        )
         execution = ExecutionSimulator(self.config.slippage_points, self.config.fee_rate, symbol_meta.tick_size)
         portfolio = PortfolioState(self.config.initial_capital, self.config.account_currency)
         trades: list[BacktestTrade] = []
@@ -194,7 +194,8 @@ class HistoricalBacktestEngine:
                 else:
                     price_difference = entry_price - Decimal(str(exit_price))
                 gross_pnl = calculate_price_pnl(price_difference, symbol_meta.tick_size, symbol_meta.tick_value, volume)
-                fees = execution.fees_for(abs(gross_pnl))
+                notional = entry_price * volume * symbol_meta.contract_size
+                fees = execution.fees_for(notional)
                 net_pnl = gross_pnl - fees
                 trade = BacktestTrade(
                     trade_id=str(position["trade_id"]),
@@ -247,14 +248,20 @@ class HistoricalBacktestEngine:
                         pending_entry = None
                         continue
 
-                planned_entry_price = execution.entry_price_for(side, Decimal(str(candle["close"])))
+                planned_entry_price = execution.entry_price_for(
+                    side, Decimal(str(candle["close"]))
+                )
+
+                if not strategy.feature_ready or strategy.atr is None or strategy.atr <= 0:
+                    pending_entry = None
+                    continue
                 proposed_trade = ProposedTrade(
                     symbol=symbol,
                     side=side,
                     entry_price=planned_entry_price,
                     strategy_signal=strategy.signal,
                     regime=regime.regime.value,
-                    atr=Decimal(str(feature.atr or 0.001)),
+                    atr=strategy.atr,
                     recent_high=Decimal(str(candle["high"])),
                     recent_low=Decimal(str(candle["low"])),
                     timestamp=current_time,
@@ -310,7 +317,10 @@ class HistoricalBacktestEngine:
                 symbol_meta.tick_value,
                 Decimal(str(position["entry_volume"])),
             )
-            fees = execution.fees_for(abs(gross_pnl))
+            entry_price = Decimal(str(position["entry_price"]))
+            entry_volume = Decimal(str(position["entry_volume"]))
+            notional = entry_price * entry_volume * symbol_meta.contract_size
+            fees = execution.fees_for(notional)
             net_pnl = gross_pnl - fees
             trade = BacktestTrade(
                 trade_id=str(position["trade_id"]),
