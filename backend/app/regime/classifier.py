@@ -89,7 +89,13 @@ class MarketRegimeClassifier:
         macd_signal = self._require_finite(current.macd_signal, "macd_signal")
         macd_histogram = self._require_finite(current.macd_histogram, "macd_histogram")
 
-        if adx is None or atr is None or ema_fast is None or ema_slow is None:
+        if (
+            adx is None
+            or atr is None
+            or atr <= 0
+            or ema_fast is None
+            or ema_slow is None
+        ):
             return MarketRegimeResult(
                 timestamp=timestamp,
                 regime=MarketRegime.INSUFFICIENT_DATA,
@@ -112,6 +118,8 @@ class MarketRegimeClassifier:
         atr_ref = self._historical_atr_reference(rows, index)
         atr_ratio = None if atr_ref in (None, 0) else atr / atr_ref
         reason_codes: list[str] = []
+        ema_distance_atr = None if ema_distance is None else ema_distance / atr
+        ema_fast_slope_atr = None if ema_fast_slope is None else ema_fast_slope / atr
 
         if adx < self.config.adx_range_threshold:
             reason_codes.append("ADX_WEAK")
@@ -140,8 +148,8 @@ class MarketRegimeClassifier:
             adx=adx,
             ema_fast=ema_fast,
             ema_slow=ema_slow,
-            ema_distance=ema_distance if ema_distance is not None else 0.0,
-            ema_fast_slope=ema_fast_slope if ema_fast_slope is not None else 0.0,
+            ema_distance=ema_distance_atr if ema_distance_atr is not None else 0.0,
+            ema_fast_slope=ema_fast_slope_atr if ema_fast_slope_atr is not None else 0.0,
             config=self.config,
         ):
             regime = MarketRegime.TRENDING_BULLISH
@@ -149,8 +157,8 @@ class MarketRegimeClassifier:
             adx=adx,
             ema_fast=ema_fast,
             ema_slow=ema_slow,
-            ema_distance=ema_distance if ema_distance is not None else 0.0,
-            ema_fast_slope=ema_fast_slope if ema_fast_slope is not None else 0.0,
+            ema_distance=ema_distance_atr if ema_distance_atr is not None else 0.0,
+            ema_fast_slope=ema_fast_slope_atr if ema_fast_slope_atr is not None else 0.0,
             config=self.config,
         ):
             regime = MarketRegime.TRENDING_BEARISH
