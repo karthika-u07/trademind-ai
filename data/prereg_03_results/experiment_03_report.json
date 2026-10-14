@@ -1,0 +1,237 @@
+{
+  "metadata": {
+    "experiment": "Preregistration 03 daily time-series momentum",
+    "seed": 20261012,
+    "replicates": 1000,
+    "numpy": "2.2.6",
+    "pandas": "2.3.3",
+    "python": "3.10.11",
+    "manifest_sha256": "0b4a748465ea2b6958d3ecfeacbe139d1184ee6ec583b16fece8012a0e674424",
+    "preregistration_sha256": "21a66ef16c6b21ddf9d216e05ec148fe37c0fffd897f558b3614caeffb2522f1",
+    "preregistration_commit": "bf2e00888b4ddc6f83dda4cfd9ef28e74e676c4d",
+    "equity_reporting_scale": 10000.0,
+    "gap_status": "UNASSESSABLE",
+    "holdout_used": false,
+    "boundary_convention": "Assign complete open-to-open interval to ending-open period; costs by execution timestamp."
+  },
+  "scenarios": {
+    "1x": {
+      "strategy": {
+        "periods": {
+          "development": {
+            "sharpe": 0.253316321211467,
+            "net_pnl": 3575.955733769853,
+            "max_drawdown": 2542.5070632250354,
+            "days": 3287
+          },
+          "validation": {
+            "sharpe": -0.1504182263514593,
+            "net_pnl": -1864.9632993529283,
+            "max_drawdown": 6511.994429009995,
+            "days": 2830
+          },
+          "pooled": {
+            "sharpe": 0.06452595821523524,
+            "net_pnl": 1710.992434416925,
+            "max_drawdown": 6511.994429009996,
+            "days": 6117
+          }
+        },
+        "per_market": {
+          "EURUSD": {
+            "net_pnl": 778.1202644177724,
+            "completed_legs": 215,
+            "gross_pnl": 1547.2343563305405,
+            "costs": 769.1140919127678,
+            "buy_legs": 107,
+            "sell_legs": 108
+          },
+          "GBPUSD": {
+            "net_pnl": 744.8541601483045,
+            "completed_legs": 225,
+            "gross_pnl": 1473.57142162247,
+            "costs": 728.7172614741655,
+            "buy_legs": 112,
+            "sell_legs": 113
+          },
+          "USDJPY": {
+            "net_pnl": 1371.7442027605507,
+            "completed_legs": 207,
+            "gross_pnl": 2183.9891689232973,
+            "costs": 812.2449661627444,
+            "buy_legs": 104,
+            "sell_legs": 103
+          },
+          "AUDUSD": {
+            "net_pnl": -201.21699429328044,
+            "completed_legs": 243,
+            "gross_pnl": 553.1340565158957,
+            "costs": 754.351050809176,
+            "buy_legs": 121,
+            "sell_legs": 122
+          },
+          "USDCAD": {
+            "net_pnl": 93.38171165381982,
+            "completed_legs": 216,
+            "gross_pnl": 1014.427739215069,
+            "costs": 921.0460275612493,
+            "buy_legs": 108,
+            "sell_legs": 108
+          },
+          "XAUUSD": {
+            "net_pnl": 227.39735727067523,
+            "completed_legs": 222,
+            "gross_pnl": 846.8143310273225,
+            "costs": 619.4169737566477,
+            "buy_legs": 111,
+            "sell_legs": 111
+          },
+          "XAGUSD": {
+            "net_pnl": -176.90353720426322,
+            "completed_legs": 156,
+            "gross_pnl": 550.7799258269303,
+            "costs": 727.6834630311936,
+            "buy_legs": 78,
+            "sell_legs": 78
+          },
+          "US500": {
+            "net_pnl": -1126.384730336653,
+            "completed_legs": 126,
+            "gross_pnl": -714.0517347572504,
+            "costs": 412.332995579402,
+            "buy_legs": 63,
+            "sell_legs": 63
+          }
+        },
+        "completed_legs": 1610,
+        "positive_contribution_share_max": 0.42660400732360554,
+        "criteria": {
+          "pooled_sharpe_positive": true,
+          "development_sharpe_positive": true,
+          "validation_sharpe_positive": false,
+          "at_least_300_legs": true,
+          "concentration_le_40pct": false,
+          "beats_baseline": true
+        },
+        "status": "FAIL"
+      },
+      "random_baseline": {
+        "status": "CALCULATED",
+        "undefined_replicates": 0,
+        "mean": -0.3478894295839838,
+        "sample_std": 0.20307746648745614,
+        "threshold": 0.05826550339092851
+      }
+    },
+    "2x": {
+      "strategy": {
+        "periods": {
+          "development": {
+            "sharpe": 0.06479742565803728,
+            "net_pnl": 916.314386339997,
+            "max_drawdown": 3627.270139788864,
+            "days": 3287
+          },
+          "validation": {
+            "sharpe": -0.39777049723726093,
+            "net_pnl": -4950.228782210419,
+            "max_drawdown": 8936.220404161457,
+            "days": 2830
+          },
+          "pooled": {
+            "sharpe": -0.15171697857670452,
+            "net_pnl": -4033.9143958704217,
+            "max_drawdown": 8936.220404161453,
+            "days": 6117
+          }
+        },
+        "per_market": {
+          "EURUSD": {
+            "net_pnl": 9.006172505004713,
+            "completed_legs": 215,
+            "gross_pnl": 1547.2343563305405,
+            "costs": 1538.2281838255356,
+            "buy_legs": 107,
+            "sell_legs": 108
+          },
+          "GBPUSD": {
+            "net_pnl": 16.136898674139047,
+            "completed_legs": 225,
+            "gross_pnl": 1473.57142162247,
+            "costs": 1457.434522948331,
+            "buy_legs": 112,
+            "sell_legs": 113
+          },
+          "USDJPY": {
+            "net_pnl": 559.499236597806,
+            "completed_legs": 207,
+            "gross_pnl": 2183.9891689232973,
+            "costs": 1624.4899323254888,
+            "buy_legs": 104,
+            "sell_legs": 103
+          },
+          "AUDUSD": {
+            "net_pnl": -955.5680451024563,
+            "completed_legs": 243,
+            "gross_pnl": 553.1340565158957,
+            "costs": 1508.702101618352,
+            "buy_legs": 121,
+            "sell_legs": 122
+          },
+          "USDCAD": {
+            "net_pnl": -827.6643159074295,
+            "completed_legs": 216,
+            "gross_pnl": 1014.427739215069,
+            "costs": 1842.0920551224986,
+            "buy_legs": 108,
+            "sell_legs": 108
+          },
+          "XAUUSD": {
+            "net_pnl": -392.0196164859726,
+            "completed_legs": 222,
+            "gross_pnl": 846.8143310273225,
+            "costs": 1238.8339475132955,
+            "buy_legs": 111,
+            "sell_legs": 111
+          },
+          "XAGUSD": {
+            "net_pnl": -904.5870002354577,
+            "completed_legs": 156,
+            "gross_pnl": 550.7799258269303,
+            "costs": 1455.3669260623872,
+            "buy_legs": 78,
+            "sell_legs": 78
+          },
+          "US500": {
+            "net_pnl": -1538.7177259160555,
+            "completed_legs": 126,
+            "gross_pnl": -714.0517347572504,
+            "costs": 824.665991158804,
+            "buy_legs": 63,
+            "sell_legs": 63
+          }
+        },
+        "completed_legs": 1610,
+        "positive_contribution_share_max": 0.9569940956296028,
+        "criteria": {
+          "pooled_sharpe_positive": false,
+          "development_sharpe_positive": true,
+          "validation_sharpe_positive": false,
+          "at_least_300_legs": true,
+          "concentration_le_40pct": false,
+          "beats_baseline": true
+        },
+        "status": "FAIL"
+      },
+      "random_baseline": {
+        "status": "CALCULATED",
+        "undefined_replicates": 0,
+        "mean": -0.6971613996604202,
+        "sample_std": 0.2033635757201842,
+        "threshold": -0.2904342482200518
+      }
+    }
+  },
+  "overall_status": "BLOCKED_REVIEW_REQUIRED",
+  "status_note": "No final PASS: session-gap status is UNASSESSABLE and daily candle boundary/price basis remain unverified. Undefined baseline Sharpe blocks the baseline comparison; no values are dropped or imputed."
+}

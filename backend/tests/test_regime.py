@@ -202,3 +202,91 @@ def test_high_normal_low_atr_ratio() -> None:
     assert high.regime == MarketRegime.VOLATILE
     assert normal.regime == MarketRegime.RANGING
     assert low.regime in {MarketRegime.RANGING, MarketRegime.TRANSITION}
+
+
+def test_realistic_eurusd_values_are_trending_after_atr_normalization() -> None:
+    service = MarketRegimeService()
+    result = service.classify(
+        [
+            make_feature(
+                adx=30.0,
+                atr=0.0007,
+                ema_fast=1.1004,
+                ema_slow=1.1000,
+                ema_distance=0.0004,
+                ema_fast_slope=0.00012,
+            )
+        ]
+    )
+
+    assert result.regime == MarketRegime.TRENDING_BULLISH
+    assert result.ema_distance == 0.0004
+    assert result.ema_fast_slope == 0.00012
+
+
+def test_eurusd_distance_below_normalized_threshold_is_not_trending() -> None:
+    service = MarketRegimeService()
+    result = service.classify(
+        [
+            make_feature(
+                adx=30.0,
+                atr=0.0007,
+                ema_fast=1.1001,
+                ema_slow=1.1000,
+                ema_distance=0.0001,
+                ema_fast_slope=0.00012,
+            )
+        ]
+    )
+
+    assert result.regime != MarketRegime.TRENDING_BULLISH
+
+
+def test_regime_is_scale_invariant_when_price_and_atr_scale_together() -> None:
+    service = MarketRegimeService()
+    original = service.classify(
+        [
+            make_feature(
+                adx=30.0,
+                atr=0.0007,
+                ema_fast=1.1004,
+                ema_slow=1.1000,
+                ema_distance=0.0004,
+                ema_fast_slope=0.00012,
+            )
+        ]
+    )
+    scaled = service.classify(
+        [
+            make_feature(
+                adx=30.0,
+                atr=0.07,
+                ema_fast=110.04,
+                ema_slow=110.00,
+                ema_distance=0.04,
+                ema_fast_slope=0.012,
+            )
+        ]
+    )
+
+    assert original.regime == MarketRegime.TRENDING_BULLISH
+    assert original.regime == scaled.regime
+
+
+def test_zero_atr_is_insufficient_data() -> None:
+    service = MarketRegimeService()
+    result = service.classify(
+        [
+            make_feature(
+                adx=30.0,
+                atr=0.0,
+                ema_fast=1.1004,
+                ema_slow=1.1000,
+                ema_distance=0.0004,
+                ema_fast_slope=0.00012,
+            )
+        ]
+    )
+
+    assert result.regime == MarketRegime.INSUFFICIENT_DATA
+    assert result.feature_ready is False

@@ -9,7 +9,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ModuleNotFoundError as error:
+    if error.name != "MetaTrader5":
+        raise
+    mt5 = None
 
 
 class MT5Client:
@@ -31,6 +36,11 @@ class MT5Client:
 
     def connect(self) -> bool:
         """Initialize the MetaTrader 5 terminal connection."""
+
+        if mt5 is None:
+            raise RuntimeError(
+                "MetaTrader5 package is required to connect"
+            )
 
         if self.path:
             initialized = mt5.initialize(path=self.path)
